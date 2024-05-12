@@ -92,7 +92,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
         MySqlSourceConfig sourceConfig =
                 getConfig(customerDatabase, new String[] {"customers_even_dist"}, 4);
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
         final DataType dataType =
                 DataTypes.ROW(
                         DataTypes.FIELD("id", DataTypes.BIGINT()),
@@ -121,7 +121,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
                 DebeziumUtils.createBinaryClient(sourceConfig.getDbzConfiguration());
         MySqlConnection mySqlConnection = DebeziumUtils.createMySqlConnection(sourceConfig);
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
         final DataType dataType =
                 DataTypes.ROW(
                         DataTypes.FIELD("id", DataTypes.BIGINT()),
@@ -156,7 +156,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
         MySqlSourceConfig sourceConfig =
                 getConfig(customerDatabase, new String[] {"customers_even_dist"}, 4);
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
 
         final DataType dataType =
                 DataTypes.ROW(
@@ -190,7 +190,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
         MySqlSourceConfig sourceConfig =
                 getConfig(customerDatabase, new String[] {"customer_card_single_line"}, 10);
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
 
         final DataType dataType =
                 DataTypes.ROW(
@@ -214,7 +214,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
                         new String[] {"customer_card", "customer_card_single_line"},
                         10);
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
 
         DataType dataType =
                 DataTypes.ROW(
@@ -258,7 +258,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
         MySqlSourceConfig sourceConfig =
                 getConfig(customerDatabase, new String[] {"customer_card", "customers_1"}, 10);
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
 
         DataType dataType =
                 DataTypes.ROW(
@@ -683,5 +683,48 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
             return false;
         }
         return true;
+    }
+
+    static class MakeBinlogEventTaskContext extends StatefulTaskContext {
+
+        private final Supplier<Boolean> makeBinlogFunction;
+
+        public MakeBinlogEventTaskContext(
+                MySqlSourceConfig sourceConfig,
+                BinaryLogClient binaryLogClient,
+                MySqlConnection connection,
+                Supplier<Boolean> makeBinlogFunction) {
+            super(sourceConfig, binaryLogClient, connection, null);
+            this.makeBinlogFunction = makeBinlogFunction;
+        }
+
+        @Override
+        public EventDispatcher.SnapshotReceiver<MySqlPartition> getSnapshotReceiver() {
+            EventDispatcher.SnapshotReceiver<MySqlPartition> snapshotReceiver =
+                    super.getSnapshotReceiver();
+            return new EventDispatcher.SnapshotReceiver<MySqlPartition>() {
+
+                @Override
+                public void changeRecord(
+                        MySqlPartition partition,
+                        DataCollectionSchema schema,
+                        Envelope.Operation operation,
+                        Object key,
+                        Struct value,
+                        OffsetContext offset,
+                        ConnectHeaders headers)
+                        throws InterruptedException {
+                    snapshotReceiver.changeRecord(
+                            partition, schema, operation, key, value, offset, headers);
+                }
+
+                @Override
+                public void completeSnapshot() throws InterruptedException {
+                    snapshotReceiver.completeSnapshot();
+                    // make binlog events
+                    makeBinlogFunction.get();
+                }
+            };
+        }
     }
 }

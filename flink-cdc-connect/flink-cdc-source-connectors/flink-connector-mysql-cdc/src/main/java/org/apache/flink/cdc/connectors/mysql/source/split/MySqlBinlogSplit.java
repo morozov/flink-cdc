@@ -167,6 +167,7 @@ public class MySqlBinlogSplit extends MySqlSplit {
                 startingOffset = splitInfo.getHighWatermark();
             }
         }
+
         splitInfos.addAll(binlogSplit.getFinishedSnapshotSplitInfos());
         return new MySqlBinlogSplit(
                 binlogSplit.splitId,
@@ -175,6 +176,30 @@ public class MySqlBinlogSplit extends MySqlSplit {
                 splitInfos,
                 binlogSplit.getTableSchemas(),
                 binlogSplit.getTotalFinishedSplitSize(),
+                binlogSplit.isSuspended());
+    }
+
+    public static MySqlBinlogSplit replaceFinishedSplitInfos(
+            MySqlBinlogSplit binlogSplit, List<FinishedSnapshotSplitInfo> splitInfos) {
+        LOG.info("Creating new binlogsplit with the new table splits");
+        // added by decodable in case where we want to fully replace the splitinfos of the binlog
+        // this should be similar to appendFinishedSplitInfos, only replacing the splitinfos but
+        // everything else same
+        // re-calculate the starting binlog offset after the new table added
+        BinlogOffset startingOffset = binlogSplit.getStartingOffset();
+        for (FinishedSnapshotSplitInfo splitInfo : splitInfos) {
+            if (splitInfo.getHighWatermark().isBefore(startingOffset)) {
+                startingOffset = splitInfo.getHighWatermark();
+            }
+        }
+
+        return new MySqlBinlogSplit(
+                binlogSplit.splitId,
+                startingOffset,
+                binlogSplit.getEndingOffset(),
+                splitInfos,
+                binlogSplit.getTableSchemas(),
+                splitInfos.size(),
                 binlogSplit.isSuspended());
     }
 
@@ -239,6 +264,7 @@ public class MySqlBinlogSplit extends MySqlSplit {
     }
 
     public static MySqlBinlogSplit toSuspendedBinlogSplit(MySqlBinlogSplit normalBinlogSplit) {
+        LOG.info("Suspending binlog split {}", normalBinlogSplit.splitId);
         return new MySqlBinlogSplit(
                 normalBinlogSplit.splitId,
                 normalBinlogSplit.getStartingOffset(),

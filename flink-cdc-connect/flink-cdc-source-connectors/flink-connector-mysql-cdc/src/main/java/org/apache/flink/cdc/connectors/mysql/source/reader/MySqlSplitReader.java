@@ -238,7 +238,7 @@ public class MySqlSplitReader implements SplitReader<SourceRecords, MySqlSplit> 
             final BinaryLogClient binaryLogClient =
                     DebeziumUtils.createBinaryClient(sourceConfig.getDbzConfiguration());
             final StatefulTaskContext statefulTaskContext =
-                    new StatefulTaskContext(sourceConfig, binaryLogClient, jdbcConnection);
+                    new StatefulTaskContext(sourceConfig, binaryLogClient, jdbcConnection, context);
             reusedSnapshotReader =
                     new SnapshotSplitReader(statefulTaskContext, subtaskId, snapshotHooks);
         }
@@ -252,7 +252,7 @@ public class MySqlSplitReader implements SplitReader<SourceRecords, MySqlSplit> 
             final BinaryLogClient binaryLogClient =
                     DebeziumUtils.createBinaryClient(sourceConfig.getDbzConfiguration());
             final StatefulTaskContext statefulTaskContext =
-                    new StatefulTaskContext(sourceConfig, binaryLogClient, jdbcConnection);
+                    new StatefulTaskContext(sourceConfig, binaryLogClient, jdbcConnection, context);
             reusedBinlogReader = new BinlogSplitReader(statefulTaskContext, subtaskId);
         }
         return reusedBinlogReader;

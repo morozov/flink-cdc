@@ -240,7 +240,10 @@ public class MySqlSnapshotSplitReadTask
             throws InterruptedException {
 
         long exportStart = clock.currentTimeInMillis();
-        LOG.info("Exporting data from split '{}' of table {}", snapshotSplit.splitId(), table.id());
+        LOG.info(
+                String.format(
+                        "Exporting data from split '%s' of table %s",
+                        snapshotSplit.splitId(), table.id()));
 
         final String selectSql =
                 StatementUtils.buildSplitScanQuery(
@@ -248,7 +251,7 @@ public class MySqlSnapshotSplitReadTask
                         snapshotSplit.getSplitKeyType(),
                         snapshotSplit.getSplitStart() == null,
                         snapshotSplit.getSplitEnd() == null);
-        LOG.info(
+        LOG.debug(
                 "For split '{}' of table {} using select statement: '{}'",
                 snapshotSplit.splitId(),
                 table.id(),
@@ -281,10 +284,11 @@ public class MySqlSnapshotSplitReadTask
                 if (logTimer.expired()) {
                     long stop = clock.currentTimeInMillis();
                     LOG.info(
-                            "Exported {} records for split '{}' after {}",
-                            rows,
-                            snapshotSplit.splitId(),
-                            Strings.duration(stop - exportStart));
+                            String.format(
+                                    "Logtimer expired: Exported %s records for split '%s' after %s",
+                                    rows,
+                                    snapshotSplit.splitId(),
+                                    Strings.duration(stop - exportStart)));
                     snapshotChangeEventSourceMetrics.rowsScanned(
                             snapshotContext.partition, table.id(), rows);
                     logTimer = getTableScanLogTimer();
@@ -296,10 +300,11 @@ public class MySqlSnapshotSplitReadTask
                         snapshotReceiver);
             }
             LOG.info(
-                    "Finished exporting {} records for split '{}', total duration '{}'",
-                    rows,
-                    snapshotSplit.splitId(),
-                    Strings.duration(clock.currentTimeInMillis() - exportStart));
+                    String.format(
+                            "Finished exporting %s records for split '%s', total duration '%s'",
+                            rows,
+                            snapshotSplit.splitId(),
+                            Strings.duration(clock.currentTimeInMillis() - exportStart)));
         } catch (SQLException e) {
             throw new ConnectException("Snapshotting of table " + table.id() + " failed", e);
         }

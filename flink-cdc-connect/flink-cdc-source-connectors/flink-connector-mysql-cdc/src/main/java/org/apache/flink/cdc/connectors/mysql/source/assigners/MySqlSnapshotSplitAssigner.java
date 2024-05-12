@@ -219,6 +219,28 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
             try (JdbcConnection jdbc = DebeziumUtils.openJdbcConnection(sourceConfig)) {
                 final List<TableId> currentCapturedTables =
                         DebeziumUtils.discoverCapturedTables(jdbc, sourceConfig);
+                // todo: there are some tables specified by users that may not be captured since
+                // they don't exist
+                // or are visible at startup time. But maybe created later. Maybe makes sense to
+                // still track them with
+                // single split since they can be discovered in binlog when created later. But we
+                // need to introduce
+                // runtime schema discovery when they are created later.
+                // But There is also an edge case where table is created later and binlog detects it
+                // but DDL schema
+                // query fails because there is no privilege to query the table. Binlog should still
+                // have table
+                // creation event with schema too?
+                // We have to be careful through since TM may capture the table while reading binlog
+                // but JM does not
+                // know and upon restart, JM will discover it as new table and try to do snapshot.
+                // --------------------------
+                // also to consider that maybe this is ok since the list of tables and databases
+                // provided are filters
+                // only and the contract with the user is it is used to scan the tables at startup
+                // to include tables
+                // to capture. In that case the behavior makes sense.
+
                 final Set<TableId> previousCapturedTables = new HashSet<>();
                 List<TableId> tablesInRemainingSplits =
                         remainingSplits.stream()
@@ -238,6 +260,9 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
 
                 // case 1: there are old tables to remove from state
                 if (!tablesToRemove.isEmpty()) {
+                    LOG.warn(
+                            "These previously added tables will be removed since they were not found with table scan: {}",
+                            tablesToRemove);
 
                     // remove unassigned tables/splits if it does not satisfy new table filter
                     List<String> splitsToRemove = new LinkedList<>();
@@ -256,6 +281,29 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
                     LOG.info("Enumerator remove tables after restart: {}", tablesToRemove);
                     remainingTables.removeAll(tablesToRemove);
                     alreadyProcessedTables.removeIf(tableId -> tablesToRemove.contains(tableId));
+                    // todo: this does not happen in TM since TM does not scan database for table
+                    // existence.
+                    // This completely messes up the contents of different group.
+                    // This is specifically dangerous since TM is always checking only the last
+                    // group whereas
+                    // an existing split from non-last groups can/will be removed.
+                    // We should implement to have TM should refresh the state completely when this
+                    // happens
+                    // current workaround is to make the split group large enough to have one split
+                    // only so that
+                    // it gets full refresh due to newly added tables
+
+                    // todo: we should figure out if this behavior is correct!
+                    // there is a world we keep them since we were already tracking them and user
+                    // wants them, im case
+                    // the table is recreated again. The issue though is we have to introduce
+                    // dynamic table schema
+                    // querying (currently schemas are captured at the startup only).
+                    // There is also a world where this behavior is correct since we use the
+                    // supplied database and
+                    // tables are filters only. And if they no longer detect the tables, they should
+                    // remove it.
+                    // from product perspective, we should have a consistent contract though
                 }
 
                 // case 2: there are new tables to add

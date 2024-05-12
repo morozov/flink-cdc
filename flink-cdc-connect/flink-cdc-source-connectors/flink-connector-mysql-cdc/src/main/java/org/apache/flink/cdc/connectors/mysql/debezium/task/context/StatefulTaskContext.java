@@ -26,6 +26,14 @@ import org.apache.flink.cdc.connectors.mysql.source.offset.BinlogOffset;
 import org.apache.flink.cdc.connectors.mysql.source.split.MySqlSplit;
 
 import com.github.shyiko.mysql.binlog.BinaryLogClient;
+import com.ververica.cdc.connectors.mysql.debezium.DebeziumUtils;
+import com.ververica.cdc.connectors.mysql.debezium.EmbeddedFlinkDatabaseHistory;
+import com.ververica.cdc.connectors.mysql.debezium.dispatcher.EventDispatcherImpl;
+import com.ververica.cdc.connectors.mysql.debezium.dispatcher.SignalEventDispatcher;
+import com.ververica.cdc.connectors.mysql.source.config.MySqlSourceConfig;
+import com.ververica.cdc.connectors.mysql.source.offset.BinlogOffset;
+import com.ververica.cdc.connectors.mysql.source.reader.MySqlSourceReaderContext;
+import com.ververica.cdc.connectors.mysql.source.split.MySqlSplit;
 import io.debezium.connector.AbstractSourceInfo;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.connector.mysql.GtidSet;
@@ -79,6 +87,7 @@ public class StatefulTaskContext {
 
     private final MySqlSourceConfig sourceConfig;
     private final MySqlConnectorConfig connectorConfig;
+    private final MySqlSourceReaderContext sourceReaderContext;
     private final MySqlEventMetadataProvider metadataProvider;
     private final SchemaNameAdjuster schemaNameAdjuster;
     private final MySqlConnection connection;
@@ -100,9 +109,11 @@ public class StatefulTaskContext {
     public StatefulTaskContext(
             MySqlSourceConfig sourceConfig,
             BinaryLogClient binaryLogClient,
-            MySqlConnection connection) {
+            MySqlConnection connection,
+            MySqlSourceReaderContext sourceReaderContext) {
         this.sourceConfig = sourceConfig;
         this.connectorConfig = sourceConfig.getMySqlConnectorConfig();
+        this.sourceReaderContext = sourceReaderContext;
         this.schemaNameAdjuster = SchemaNameAdjuster.create();
         this.metadataProvider = new MySqlEventMetadataProvider();
         this.binaryLogClient = binaryLogClient;
@@ -127,6 +138,16 @@ public class StatefulTaskContext {
 
         this.offsetContext =
                 loadStartingOffsetState(new MySqlOffsetContext.Loader(connectorConfig), mySqlSplit);
+        if (mySqlSplit.isBinlogSplit() && !sourceReaderContext.isStartedWithAssignedBinlogSplit()) {
+            String binlogFileName =
+                    connectorConfig.getConfig().getString("mysql.cdc.start.binlogFileName");
+            Long binlogStartPosition =
+                    connectorConfig.getConfig().getLong("mysql.cdc.start.binlogStartPosition");
+            if (binlogFileName != null && binlogStartPosition != null) {
+                // this should either be first start or force restart
+                offsetContext.setBinlogStartPoint(binlogFileName, binlogStartPosition);
+            }
+        }
         validateAndLoadDatabaseHistory(offsetContext, databaseSchema);
 
         this.taskContext =
@@ -420,5 +441,9 @@ public class StatefulTaskContext {
 
     public SchemaNameAdjuster getSchemaNameAdjuster() {
         return schemaNameAdjuster;
+    }
+
+    public MySqlSourceReaderContext getSourceReaderContext() {
+        return sourceReaderContext;
     }
 }

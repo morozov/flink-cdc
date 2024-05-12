@@ -416,6 +416,15 @@ public class RecordUtils {
         return BinlogOffset.builder().setOffsetMap(offsetStrMap).build();
     }
 
+    public static BinlogOffset getBinlogPositionWithoutServerId(Map<String, ?> offset) {
+        Map<String, String> offsetStrMap = new HashMap<>();
+        for (Map.Entry<String, ?> entry : offset.entrySet()) {
+            offsetStrMap.put(
+                    entry.getKey(), entry.getValue() == null ? null : entry.getValue().toString());
+        }
+        return BinlogOffset.builder().setOffsetMap(offsetStrMap).setServerId(0L).build();
+    }
+
     /** Returns the specific key contains in the split key range or not. */
     public static boolean splitKeyRangeContains(
             Object[] key, Object[] splitKeyStart, Object[] splitKeyEnd) {

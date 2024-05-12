@@ -63,6 +63,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -110,6 +111,21 @@ public class MySqlSourceReader<T>
 
     @Override
     public void start() {
+        if (getNumberOfCurrentlyAssignedSplits() == 0) {
+            LOG.info("This reader has never been assigned binlog splits");
+            // this could either mean:
+            // 1. there are multiple readers and this was not chosen for binlog reading since that
+            // is done by 1 reader
+            // 2. this is the chosen reader for binlog reading but this is first time starting the
+            // conn or force
+            // restart that no earlier state exists
+            // If the reader was normally restarted (no force restart), by this time it's state
+            // would already have been
+            // restored and it would have the binlog split it was last assigned
+            mySqlSourceReaderContext.setStartedWithAssignedBinlogSplit(false);
+        } else {
+            mySqlSourceReaderContext.setStartedWithAssignedBinlogSplit(true);
+        }
         if (getNumberOfCurrentlyAssignedSplits() <= 1) {
             context.sendSplitRequest();
         }
@@ -250,6 +266,11 @@ public class MySqlSourceReader<T>
                 }
             } else {
                 MySqlBinlogSplit binlogSplit = split.asBinlogSplit();
+                LOG.info(
+                        "Attempting to add binlog split : {} with {} actual table splits, but {} target splits.",
+                        binlogSplit,
+                        binlogSplit.getFinishedSnapshotSplitInfos().size(),
+                        binlogSplit.getTotalFinishedSplitSize());
                 // When restore from a checkpoint, the finished split infos may contain some splits
                 // for the deleted tables.
                 // We need to remove these splits for the deleted tables at the finished split
@@ -262,6 +283,7 @@ public class MySqlSourceReader<T>
                                             .getMySqlConnectorConfig()
                                             .getTableFilters()
                                             .dataCollectionFilter());
+                    removeDuplicateSplits(binlogSplit);
                 }
 
                 // Try to discovery table schema once for newly added tables when source reader
@@ -273,11 +295,14 @@ public class MySqlSourceReader<T>
 
                 // the binlog split is suspended
                 if (binlogSplit.isSuspended()) {
+                    LOG.info("binlog read is suspended");
                     suspendedBinlogSplit = binlogSplit;
                 } else if (!binlogSplit.isCompletedSplit()) {
+                    LOG.debug("binlog split is not complete");
                     uncompletedBinlogSplits.put(binlogSplit.splitId(), binlogSplit);
                     requestBinlogSplitMetaIfNeeded(binlogSplit);
                 } else {
+                    LOG.info("binlog split is ready for read");
                     uncompletedBinlogSplits.remove(binlogSplit.splitId());
                     MySqlBinlogSplit mySqlBinlogSplit =
                             discoverTableSchemasForBinlogSplit(
@@ -297,6 +322,27 @@ public class MySqlSourceReader<T>
         } else if (suspendedBinlogSplit
                 != null) { // only request new snapshot split if the binlog split is suspended
             context.sendSplitRequest();
+        }
+    }
+
+    private static void removeDuplicateSplits(MySqlBinlogSplit binlogSplit) {
+        // why duplicate splits happen - this is caused by issues when JM stops tracking deleted
+        // tables
+        // but TM does not scan for such non-existing tables, so keeps it. Later when same table is
+        // created again
+        // the JM will send the table again.
+        // THIS CAN BE REMOVED ONCE WE REMOVE ALL CONNECTIONS WITH BAD SPLIT
+        Set<String> alreadySeenSplitIds = new HashSet<>();
+        Iterator<FinishedSnapshotSplitInfo> infoIter =
+                binlogSplit.getFinishedSnapshotSplitInfos().iterator();
+        while (infoIter.hasNext()) {
+            String splitId = infoIter.next().getSplitId();
+            if (alreadySeenSplitIds.contains(splitId)) {
+                LOG.info("duplicate split {} found - removing...", splitId);
+                infoIter.remove();
+            } else {
+                alreadySeenSplitIds.add(splitId);
+            }
         }
     }
 
@@ -377,6 +423,7 @@ public class MySqlSourceReader<T>
 
     private void requestBinlogSplitMetaIfNeeded(MySqlBinlogSplit binlogSplit) {
         final String splitId = binlogSplit.splitId();
+        removeDuplicateSplits(binlogSplit);
         if (!binlogSplit.isCompletedSplit()) {
             final int nextMetaGroupId =
                     ChunkUtils.getNextMetaGroupId(
@@ -413,20 +460,38 @@ public class MySqlSourceReader<T>
                 uncompletedBinlogSplits.put(binlogSplit.splitId(), binlogSplit);
             } else if (receivedMetaGroupId == expectedMetaGroupId) {
                 List<FinishedSnapshotSplitInfo> newAddedMetadataGroup;
-                Set<String> existedSplitsOfLastGroup =
-                        getExistedSplitsOfLastGroup(
-                                binlogSplit.getFinishedSnapshotSplitInfos(),
-                                sourceConfig.getSplitMetaGroupSize());
-                newAddedMetadataGroup =
-                        metadataEvent.getMetaGroup().stream()
-                                .map(FinishedSnapshotSplitInfo::deserialize)
-                                .filter(r -> !existedSplitsOfLastGroup.contains(r.getSplitId()))
-                                .collect(Collectors.toList());
+                if (binlogSplit.getFinishedSnapshotSplitInfos().size()
+                        <= sourceConfig.getSplitMetaGroupSize()) {
+                    // there is only one meta group, so replace the existing
+                    // FinishedSnapshotSplitInfos completely
+                    LOG.info(
+                            "There is only one split group because table split size is {} and meta group size is {}. Switching to binlog split with new data.",
+                            binlogSplit.getFinishedSnapshotSplitInfos().size(),
+                            sourceConfig.getSplitMetaGroupSize());
+                    newAddedMetadataGroup =
+                            metadataEvent.getMetaGroup().stream()
+                                    .map(FinishedSnapshotSplitInfo::deserialize)
+                                    .collect(Collectors.toList());
+                    uncompletedBinlogSplits.put(
+                            binlogSplit.splitId(),
+                            MySqlBinlogSplit.replaceFinishedSplitInfos(
+                                    binlogSplit, newAddedMetadataGroup));
 
-                uncompletedBinlogSplits.put(
-                        binlogSplit.splitId(),
-                        MySqlBinlogSplit.appendFinishedSplitInfos(
-                                binlogSplit, newAddedMetadataGroup));
+                } else {
+                    Set<String> existedSplitsOfLastGroup =
+                            getExistedSplitsOfLastGroup(
+                                    binlogSplit.getFinishedSnapshotSplitInfos(),
+                                    sourceConfig.getSplitMetaGroupSize());
+                    newAddedMetadataGroup =
+                            metadataEvent.getMetaGroup().stream()
+                                    .map(FinishedSnapshotSplitInfo::deserialize)
+                                    .filter(r -> !existedSplitsOfLastGroup.contains(r.getSplitId()))
+                                    .collect(Collectors.toList());
+                    uncompletedBinlogSplits.put(
+                            binlogSplit.splitId(),
+                            MySqlBinlogSplit.appendFinishedSplitInfos(
+                                    binlogSplit, newAddedMetadataGroup));
+                }
                 LOG.info(
                         "Source reader {} fills metadata of group {} to binlog split",
                         subtaskId,

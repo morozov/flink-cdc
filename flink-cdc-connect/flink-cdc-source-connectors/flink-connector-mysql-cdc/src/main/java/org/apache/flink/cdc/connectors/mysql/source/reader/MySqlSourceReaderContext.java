@@ -28,6 +28,7 @@ public class MySqlSourceReaderContext {
     private final SourceReaderContext sourceReaderContext;
     private volatile boolean isBinlogSplitReaderSuspended;
     private volatile boolean hasAssignedBinlogSplit;
+    private volatile boolean isStartedWithAssignedBinlogSplit; // binlog split restored from state
 
     public MySqlSourceReaderContext(final SourceReaderContext sourceReaderContext) {
         this.sourceReaderContext = sourceReaderContext;
@@ -57,5 +58,13 @@ public class MySqlSourceReaderContext {
 
     public void setHasAssignedBinlogSplit(boolean hasAssignedBinlogSplit) {
         this.hasAssignedBinlogSplit = hasAssignedBinlogSplit;
+    }
+
+    public boolean isStartedWithAssignedBinlogSplit() {
+        return isStartedWithAssignedBinlogSplit;
+    }
+
+    public void setStartedWithAssignedBinlogSplit(boolean startedWithAssignedBinlogSplit) {
+        isStartedWithAssignedBinlogSplit = startedWithAssignedBinlogSplit;
     }
 }

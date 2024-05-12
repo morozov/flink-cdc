@@ -36,19 +36,43 @@ import org.apache.flink.shaded.guava31.com.google.common.util.concurrent.ThreadF
 
 import com.github.shyiko.mysql.binlog.event.Event;
 import com.github.shyiko.mysql.binlog.event.EventType;
+import com.ververica.cdc.connectors.mysql.debezium.task.MySqlBinlogSplitReadTask;
+import com.ververica.cdc.connectors.mysql.debezium.task.context.StatefulTaskContext;
+import com.ververica.cdc.connectors.mysql.source.offset.BinlogOffset;
+import com.ververica.cdc.connectors.mysql.source.offset.BinlogOffsetKind;
+import com.ververica.cdc.connectors.mysql.source.split.FinishedSnapshotSplitInfo;
+import com.ververica.cdc.connectors.mysql.source.split.MySqlBinlogSplit;
+import com.ververica.cdc.connectors.mysql.source.split.MySqlSplit;
+import com.ververica.cdc.connectors.mysql.source.split.SourceRecords;
+import com.ververica.cdc.connectors.mysql.source.utils.ChunkUtils;
+import com.ververica.cdc.connectors.mysql.source.utils.RecordUtils;
+import com.ververica.cdc.connectors.mysql.source.utils.StatementUtils;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.connector.mysql.MySqlStreamingChangeEventSourceMetrics;
+import io.debezium.data.Envelope;
+import io.debezium.jdbc.JdbcConnection;
 import io.debezium.pipeline.DataChangeEvent;
+import io.debezium.pipeline.source.spi.ChangeEventSource;
+import io.debezium.relational.Column;
+import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
 import io.debezium.relational.Tables;
+import org.apache.kafka.connect.data.Field;
+import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -57,9 +81,18 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
+
+import static com.ververica.cdc.connectors.mysql.source.utils.RecordUtils.getBinlogPosition;
+import static com.ververica.cdc.connectors.mysql.source.utils.RecordUtils.getBinlogPositionWithoutServerId;
+import static com.ververica.cdc.connectors.mysql.source.utils.RecordUtils.getSplitKey;
+import static com.ververica.cdc.connectors.mysql.source.utils.RecordUtils.getStructContainsChunkKey;
+import static com.ververica.cdc.connectors.mysql.source.utils.RecordUtils.getTableId;
+import static com.ververica.cdc.connectors.mysql.source.utils.RecordUtils.isDataChangeRecord;
 
 /**
  * A Debezium binlog reader implementation that also support reads binlog and filter overlapping
@@ -80,10 +113,16 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
     private Map<TableId, List<FinishedSnapshotSplitInfo>> finishedSplitsInfo;
     // tableId -> the max splitHighWatermark
     private Map<TableId, BinlogOffset> maxSplitHighWatermarkMap;
+    // max of all splits high watermark. Used as limit for scanning for deletes.
+    private BinlogOffset maxAllSplitsHighWatermark;
     private final Set<TableId> pureBinlogPhaseTables;
     private Tables.TableFilter capturedTableFilter;
     private final StoppableChangeEventSourceContext changeEventSourceContext =
             new StoppableChangeEventSourceContext();
+    private boolean scanDanglingDeletes;
+    // map to track # of records emitted
+    private final ScheduledExecutorService metricsLoggerScheduler;
+    private Map<String, Map<String, AtomicInteger>> recordsEmittedMap = new HashMap<>();
 
     private static final long READER_CLOSE_TIMEOUT = 30L;
 
@@ -94,6 +133,52 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
         this.executorService = Executors.newSingleThreadExecutor(threadFactory);
         this.currentTaskRunning = true;
         this.pureBinlogPhaseTables = new HashSet<>();
+        this.scanDanglingDeletes =
+                !this.statefulTaskContext
+                        .getSourceReaderContext()
+                        .isStartedWithAssignedBinlogSplit();
+        metricsLoggerScheduler = schedulePeriodicMetricsLogging();
+    }
+
+    private ScheduledExecutorService schedulePeriodicMetricsLogging() {
+        // schedule a reporter task to log # of records emitted per table
+        // we probably want to remove the log once we know drata is good
+        // this is helpful in debugging their missing data issue right now
+        ScheduledExecutorService metricsLoggerScheduler =
+                Executors.newScheduledThreadPool(
+                        1,
+                        r -> {
+                            Thread t = new Thread(r, "metrics-logger");
+                            t.setDaemon(true);
+                            return t;
+                        });
+        metricsLoggerScheduler.scheduleAtFixedRate(
+                () -> {
+                    Map<String, Map<String, AtomicInteger>> oldRecordsEmittedMap =
+                            recordsEmittedMap;
+                    recordsEmittedMap = new HashMap<>();
+                    LOG.info("Records emitted since last:");
+                    for (Map.Entry<String, Map<String, AtomicInteger>> tableIdOpCounterMap :
+                            oldRecordsEmittedMap.entrySet()) {
+                        String tableId = tableIdOpCounterMap.getKey();
+                        // iterate over record's op specific metrics
+                        for (Map.Entry<String, AtomicInteger> e :
+                                tableIdOpCounterMap.getValue().entrySet()) {
+                            String op = e.getKey();
+                            LOG.info(
+                                    "Records emitted: "
+                                            + tableId
+                                            + ",  "
+                                            + op
+                                            + ", "
+                                            + e.getValue().intValue());
+                        }
+                    }
+                },
+                5,
+                5,
+                TimeUnit.MINUTES);
+        return metricsLoggerScheduler;
     }
 
     public void submitSplit(MySqlSplit mySqlSplit) {
@@ -149,6 +234,9 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
         final List<SourceRecord> sourceRecords = new ArrayList<>();
         if (currentTaskRunning) {
             List<DataChangeEvent> batch = queue.poll();
+            if (scanDanglingDeletes) {
+                checkForDanglingDeletes(batch, sourceRecords); // first process all dangling deletes
+            }
             for (DataChangeEvent event : batch) {
                 if (shouldEmit(event.getRecord())) {
                     sourceRecords.add(event.getRecord());
@@ -159,6 +247,173 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
             return sourceRecordsSet.iterator();
         } else {
             return null;
+        }
+    }
+
+    private void checkForDanglingDeletes(
+            List<DataChangeEvent> batch, List<SourceRecord> sourceRecords) {
+        if (batch.isEmpty()) {
+            return;
+        }
+
+        LOG.info("Check for dangling delete - batch start");
+        // if there is a force restart with existing binlog filename and position set, then we want
+        // to check for deletes for all tracked table splits until each of their new startoffset is
+        // hit in case we missed the deletes in between. this patch was added to operationally
+        // address the dangling deletes issue for drata so that we can pickup delete events that
+        // happen during some downtime between connection stop and force restart.
+
+        Map<Struct, SourceRecord> deletes = new HashMap<>();
+        boolean binlogReaderOnlyPositionReached =
+                readBatchForDeletesUntilCurrentBinlogPosition(batch, deletes);
+        if (binlogReaderOnlyPositionReached) {
+            // when this is done - there should be no further check deletes since we looked at
+            // delete event for all tables until their high watermark. Normal binlog processing
+            // can handle the rest of the deletes too now.
+            scanDanglingDeletes = false;
+            LOG.info("Check for dangling delete - stop checking for further dangling deletes");
+        }
+
+        removeDeletesThatCurrentlyExists(deletes);
+
+        if (!deletes.isEmpty()) {
+            // LOG delete count for tables
+            Map<TableId, AtomicInteger> tablesDeletesCountMap = new HashMap<>();
+            for (Map.Entry<Struct, SourceRecord> entry : deletes.entrySet()) {
+                TableId tableId = getTableId(entry.getValue());
+                tablesDeletesCountMap
+                        .computeIfAbsent(tableId, counter -> new AtomicInteger(0))
+                        .incrementAndGet();
+            }
+            for (Map.Entry<TableId, AtomicInteger> entry : tablesDeletesCountMap.entrySet()) {
+                LOG.info(
+                        "Check for dangling delete - issuing deletes for "
+                                + entry.getKey()
+                                + ", count: "
+                                + entry.getValue().intValue());
+            }
+        }
+
+        sourceRecords.addAll(deletes.values());
+        if (!scanDanglingDeletes) {
+            LOG.info("Check for dangling delete - fully complete");
+        } else {
+            LOG.info(
+                    "Check for dangling delete - partially complete, will wait for more events from binlog");
+        }
+    }
+
+    /**
+     * @param batch - current cdc record batch from the last poll
+     * @param deletes - map to add any deletes that is discovered
+     * @return true if last offset for dangling deletes found false to continue scanning for
+     *     dangling deletes
+     */
+    private boolean readBatchForDeletesUntilCurrentBinlogPosition(
+            List<DataChangeEvent> batch, Map<Struct, SourceRecord> deletes) {
+        if (maxAllSplitsHighWatermark == null) {
+            maxAllSplitsHighWatermark = currentBinlogSplit.getStartingOffset();
+        }
+
+        for (DataChangeEvent dataChangeEvent : batch) {
+            SourceRecord sourceRecord = dataChangeEvent.getRecord();
+            // we get binlog positions without serverid, since we know they are from same server and
+            // split watermarks
+            // don't have server-id (additionally no timestamp too)
+            BinlogOffset binlogPosition =
+                    getBinlogPositionWithoutServerId(sourceRecord.sourceOffset());
+
+            if (binlogPosition.isAtOrAfter(maxAllSplitsHighWatermark)) {
+                LOG.info(
+                        "Check for dangling delete - normal binlog processing offset reached {}",
+                        maxAllSplitsHighWatermark);
+                // record is at or after the offset that should be normally handled
+                // this is end of the delete tracking. We can proceed with just normal processing
+                // from this position
+                return true;
+            }
+
+            if (isDataChangeRecord(sourceRecord)) {
+                TableId tableId = getTableId(sourceRecord);
+                if (!maxSplitHighWatermarkMap.containsKey(tableId)
+                        || binlogPosition.isAtOrAfter(maxSplitHighWatermarkMap.get(tableId))) {
+                    LOG.info(
+                            "Check for dangling delete - skipping non tracked table or "
+                                    + "table's high watermark is already reached {}",
+                            tableId);
+                    // record is not from the table that is tracked and was not newly introduced
+                    // OR we reached the high watermark for the specific table.
+                    // move on to the next record
+                } else { // only process if the record is before the highwatermark for the specific
+                    // table
+                    String op =
+                            ((Struct) sourceRecord.value()).getString(Envelope.FieldName.OPERATION);
+                    Struct key = (Struct) sourceRecord.key();
+                    if (op.equals("d")) {
+                        deletes.put(key, sourceRecord);
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private void removeDeletesThatCurrentlyExists(Map<Struct, SourceRecord> deletes) {
+        LOG.info("Check for dangling delete - check if deletes exists as new row in the db");
+        List<Struct> deletesToRemove = new ArrayList<>();
+        for (Map.Entry<Struct, SourceRecord> entry : deletes.entrySet()) {
+            Struct rowKey = entry.getKey();
+            Schema keySchema = rowKey.schema();
+            Object[] recordPKVals = new Object[keySchema.fields().size()];
+            for (Field keySchemaField : keySchema.fields()) {
+                Object value = rowKey.get(keySchemaField);
+                recordPKVals[keySchemaField.index()] = value;
+            }
+
+            TableId tableId = getTableId(entry.getValue());
+            Table table = this.statefulTaskContext.getDatabaseSchema().tableFor(tableId);
+            if (table == null) {
+                // this should not happen since we already filter it out during reading the events
+                // and qualifying them
+                throw new RuntimeException(
+                        String.format(
+                                "Cannot issue delete for table %s in this connection, this should not have happened!",
+                                tableId));
+            }
+            if (isRowExists(table, statefulTaskContext.getConnection(), recordPKVals)) {
+                deletesToRemove.add(rowKey);
+            }
+        }
+        if (!deletesToRemove.isEmpty()) {
+            LOG.info("Check for dangling delete - {} deletes exists in db", deletesToRemove.size());
+        } else {
+            LOG.info("Check for dangling delete - no deletes exists in db");
+        }
+
+        LOG.info("Check for dangling delete - {} deletes before pruning", deletes.size());
+        for (Struct deleteToRemoveKey : deletesToRemove) {
+            deletes.remove(deleteToRemoveKey);
+        }
+        LOG.info("Check for dangling delete - {} deletes after pruning", deletes.size());
+    }
+
+    private boolean isRowExists(
+            Table table, JdbcConnection jdbcConnection, Object[] primaryKeyValues) {
+        TableId tableId = table.id();
+        List<Column> columns = new ArrayList<>(table.primaryKeyColumns());
+        columns.sort(Comparator.comparingInt(Column::position));
+        int numRows = 1;
+        final String selectSql = StatementUtils.buildRowExistenceQuery(tableId, columns, numRows);
+
+        try (PreparedStatement selectStatement =
+                        StatementUtils.readRowExistenceStatement(
+                                jdbcConnection,
+                                selectSql,
+                                Collections.singletonList(primaryKeyValues));
+                ResultSet rs = selectStatement.executeQuery()) {
+            return rs.next();
+        } catch (SQLException e) {
+            throw new ConnectException("Row existence check errored on table " + table.id(), e);
         }
     }
 
@@ -192,6 +447,7 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
                 }
             }
             statefulTaskContext.getDatabaseSchema().close();
+            metricsLoggerScheduler.shutdownNow();
         } catch (Exception e) {
             LOG.error("Close binlog reader error", e);
         }
@@ -217,6 +473,7 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
             TableId tableId = RecordUtils.getTableId(sourceRecord);
             BinlogOffset position = RecordUtils.getBinlogPosition(sourceRecord);
             if (hasEnterPureBinlogPhase(tableId, position)) {
+                trackRowCountForReporting(tableId, sourceRecord);
                 return true;
             }
 
@@ -235,6 +492,7 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
                     if (RecordUtils.splitKeyRangeContains(
                                     chunkKey, splitInfo.getSplitStart(), splitInfo.getSplitEnd())
                             && position.isAfter(splitInfo.getHighWatermark())) {
+                        trackRowCountForReporting(tableId, sourceRecord);
                         return true;
                     }
                 }
@@ -250,7 +508,23 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
                 return false;
             }
         }
+        // always send the schema change event and signal event
+        // we need record them to state of Flink
+        // todo: looks like we can also capture schema change event here!!
         return true;
+    }
+
+    private void trackRowCountForReporting(TableId tableId, SourceRecord sourceRecord) {
+        Struct value = (Struct) sourceRecord.value();
+        String op;
+        if (sourceRecord.valueSchema().field(Envelope.FieldName.OPERATION) == null
+                || (op = value.getString(Envelope.FieldName.OPERATION)) == null) {
+            op = "no-data-change";
+        }
+
+        Map<String, AtomicInteger> tableIdOpCounterMap =
+                recordsEmittedMap.computeIfAbsent(tableId.identifier(), s -> new HashMap<>());
+        tableIdOpCounterMap.computeIfAbsent(op, ctr -> new AtomicInteger(0)).incrementAndGet();
     }
 
     private boolean hasEnterPureBinlogPhase(TableId tableId, BinlogOffset position) {
@@ -258,6 +532,25 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
             return true;
         }
         // the existed tables those have finished snapshot reading
+        // todo: debug and check how isatorafter works since without serverid they dont seem to be
+        // working
+        // i think there is a bug here:
+        // watermarks don't have serverid and timestamp since they are created using master status
+        // sql
+        // (see: com.ververica.cdc.connectors.mysql.debezium.DebeziumUtils.currentBinlogOffset
+        // method)
+        // when comparing 2 binlogoffset (see:
+        // com.ververica.cdc.connectors.mysql.source.offset.BinlogOffset.compareTo)
+        // when there are no serverid, comparison is based on timestamp only, bypassing binlog file
+        // and position
+        // so all read binlog events qualify for emit, instead of just the ones that are at+higher
+        // watermark position
+        // for append only thing, this probably produces duplicates
+        // test: create table A add rows, wait couple seconds, create table B add rows
+        // likely observation: snapshot will pick them both and add rows
+        // binglog will reprocess table B (since its highwatermark is after the binlog start
+        // position - which is the
+        // lowest highwater of 2 (ie from table A)
         if (maxSplitHighWatermarkMap.containsKey(tableId)
                 && position.isAtOrAfter(maxSplitHighWatermarkMap.get(tableId))) {
             pureBinlogPhaseTables.add(tableId);
@@ -280,10 +573,17 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
                 currentBinlogSplit.getFinishedSnapshotSplitInfos();
         Map<TableId, List<FinishedSnapshotSplitInfo>> splitsInfoMap = new HashMap<>();
         Map<TableId, BinlogOffset> tableIdBinlogPositionMap = new HashMap<>();
+        BinlogOffset largestHighWatermark = maxAllSplitsHighWatermark;
+        if (largestHighWatermark == null) {
+            largestHighWatermark = currentBinlogSplit.getStartingOffset();
+        }
         // specific offset mode
         if (finishedSplitInfos.isEmpty()) {
             for (TableId tableId : currentBinlogSplit.getTableSchemas().keySet()) {
                 tableIdBinlogPositionMap.put(tableId, currentBinlogSplit.getStartingOffset());
+            }
+            if (currentBinlogSplit.getStartingOffset().isAfter(largestHighWatermark)) {
+                largestHighWatermark = currentBinlogSplit.getStartingOffset();
             }
         }
         // initial mode
@@ -300,8 +600,13 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
                 if (maxHighWatermark == null || highWatermark.isAfter(maxHighWatermark)) {
                     tableIdBinlogPositionMap.put(tableId, highWatermark);
                 }
+                if (highWatermark.isAfter(largestHighWatermark)) {
+                    largestHighWatermark = highWatermark;
+                }
             }
         }
+
+        this.maxAllSplitsHighWatermark = largestHighWatermark;
         this.finishedSplitsInfo = splitsInfoMap;
         this.maxSplitHighWatermarkMap = tableIdBinlogPositionMap;
         this.pureBinlogPhaseTables.clear();

@@ -49,6 +49,29 @@ import com.github.shyiko.mysql.binlog.event.Event;
 import com.github.shyiko.mysql.binlog.event.EventHeaderV4;
 import com.github.shyiko.mysql.binlog.event.EventType;
 import com.github.shyiko.mysql.binlog.event.WriteRowsEventData;
+import com.ververica.cdc.connectors.mysql.debezium.DebeziumUtils;
+import com.ververica.cdc.connectors.mysql.debezium.dispatcher.SignalEventDispatcher;
+import com.ververica.cdc.connectors.mysql.debezium.task.context.StatefulTaskContext;
+import com.ververica.cdc.connectors.mysql.debezium.task.context.exception.SchemaOutOfSyncException;
+import com.ververica.cdc.connectors.mysql.source.MySqlSourceTestBase;
+import com.ververica.cdc.connectors.mysql.source.assigners.MySqlBinlogSplitAssigner;
+import com.ververica.cdc.connectors.mysql.source.assigners.MySqlSnapshotSplitAssigner;
+import com.ververica.cdc.connectors.mysql.source.config.MySqlSourceConfig;
+import com.ververica.cdc.connectors.mysql.source.config.MySqlSourceConfigFactory;
+import com.ververica.cdc.connectors.mysql.source.offset.BinlogOffset;
+import com.ververica.cdc.connectors.mysql.source.reader.MySqlSourceReaderContext;
+import com.ververica.cdc.connectors.mysql.source.split.FinishedSnapshotSplitInfo;
+import com.ververica.cdc.connectors.mysql.source.split.MySqlBinlogSplit;
+import com.ververica.cdc.connectors.mysql.source.split.MySqlSnapshotSplit;
+import com.ververica.cdc.connectors.mysql.source.split.MySqlSplit;
+import com.ververica.cdc.connectors.mysql.source.split.SourceRecords;
+import com.ververica.cdc.connectors.mysql.source.utils.RecordUtils;
+import com.ververica.cdc.connectors.mysql.source.utils.TableDiscoveryUtils;
+import com.ververica.cdc.connectors.mysql.table.StartupOptions;
+import com.ververica.cdc.connectors.mysql.testutils.MySqlContainer;
+import com.ververica.cdc.connectors.mysql.testutils.MySqlVersion;
+import com.ververica.cdc.connectors.mysql.testutils.RecordsFormatter;
+import com.ververica.cdc.connectors.mysql.testutils.UniqueDatabase;
 import io.debezium.connector.mysql.MySqlConnection;
 import io.debezium.connector.mysql.MySqlConnectorConfig;
 import io.debezium.connector.mysql.MySqlOffsetContext;
@@ -899,8 +922,9 @@ public class BinlogSplitReaderTest extends MySqlSourceTestBase {
         return new BinlogSplitReader(
                 skipValidStartingOffset
                         ? new TestStatefulTaskContext(
-                                sourceConfig, binaryLogClient, mySqlConnection)
-                        : new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection),
+                                sourceConfig, binaryLogClient, mySqlConnection, null)
+                        : new StatefulTaskContext(
+                                sourceConfig, binaryLogClient, mySqlConnection, null),
                 0);
     }
 
@@ -966,7 +990,7 @@ public class BinlogSplitReaderTest extends MySqlSourceTestBase {
             TableId binlogChangeTableId)
             throws Exception {
         final StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
         final SnapshotSplitReader snapshotSplitReader =
                 new SnapshotSplitReader(statefulTaskContext, 0);
 
@@ -1250,8 +1274,9 @@ public class BinlogSplitReaderTest extends MySqlSourceTestBase {
         public TestStatefulTaskContext(
                 MySqlSourceConfig sourceConfig,
                 BinaryLogClient binaryLogClient,
-                MySqlConnection connection) {
-            super(sourceConfig, binaryLogClient, connection);
+                MySqlConnection connection,
+                MySqlSourceReaderContext sourceReaderContext) {
+            super(sourceConfig, binaryLogClient, connection, sourceReaderContext);
         }
 
         @Override

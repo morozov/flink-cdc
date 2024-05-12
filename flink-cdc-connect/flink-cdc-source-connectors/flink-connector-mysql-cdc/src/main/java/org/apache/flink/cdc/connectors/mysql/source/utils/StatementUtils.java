@@ -20,12 +20,14 @@ package org.apache.flink.cdc.connectors.mysql.source.utils;
 import org.apache.flink.table.types.logical.RowType;
 
 import io.debezium.jdbc.JdbcConnection;
+import io.debezium.relational.Column;
 import io.debezium.relational.TableId;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -135,6 +137,44 @@ public class StatementUtils {
         return buildSplitQuery(tableId, pkRowType, isFirstSplit, isLastSplit, -1, true);
     }
 
+    public static String buildRowExistenceQuery(
+            TableId tableId, List<Column> columns, int numRows) {
+        final String condition;
+        final StringBuilder conditionSql = new StringBuilder();
+        for (int i = 0; i < numRows; ) {
+            conditionSql.append("(");
+            addPrimaryKeyColumnsToCondition(columns, conditionSql, " = ?");
+            conditionSql.append(")");
+            if (++i < numRows) {
+                conditionSql.append(" OR ");
+            }
+        }
+        condition = conditionSql.toString();
+
+        return "SELECT "
+                + getPrimaryKeyColumnsProjection(columns)
+                + " FROM "
+                + quotedTableIdString(tableId)
+                + " WHERE "
+                + condition;
+    }
+
+    public static PreparedStatement readRowExistenceStatement(
+            JdbcConnection jdbc, String sql, List<Object[]> primaryKeyValues) {
+        try {
+            final PreparedStatement statement = initStatement(jdbc, sql, 0);
+            int i = 1;
+            for (Object[] primaryKeyValue : primaryKeyValues) {
+                for (Object o : primaryKeyValue) {
+                    statement.setObject(i++, o);
+                }
+            }
+            return statement;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to build the row existence read statement.", e);
+        }
+    }
+
     private static String buildSplitQuery(
             TableId tableId,
             RowType pkRowType,
@@ -242,6 +282,16 @@ public class StatementUtils {
     }
 
     private static void addPrimaryKeyColumnsToCondition(
+            List<Column> columns, StringBuilder sql, String predicate) {
+        for (Iterator<Column> fieldNamesIt = columns.iterator(); fieldNamesIt.hasNext(); ) {
+            sql.append(quote(fieldNamesIt.next().name())).append(predicate);
+            if (fieldNamesIt.hasNext()) {
+                sql.append(" AND ");
+            }
+        }
+    }
+
+    private static void addPrimaryKeyColumnsToCondition(
             RowType pkRowType, StringBuilder sql, String predicate) {
         for (Iterator<String> fieldNamesIt = pkRowType.getFieldNames().iterator();
                 fieldNamesIt.hasNext(); ) {
@@ -257,6 +307,17 @@ public class StatementUtils {
         for (Iterator<String> fieldNamesIt = pkRowType.getFieldNames().iterator();
                 fieldNamesIt.hasNext(); ) {
             sql.append(quote(fieldNamesIt.next()));
+            if (fieldNamesIt.hasNext()) {
+                sql.append(" , ");
+            }
+        }
+        return sql.toString();
+    }
+
+    private static String getPrimaryKeyColumnsProjection(List<Column> columns) {
+        StringBuilder sql = new StringBuilder();
+        for (Iterator<Column> fieldNamesIt = columns.iterator(); fieldNamesIt.hasNext(); ) {
+            sql.append(quote(fieldNamesIt.next().name()));
             if (fieldNamesIt.hasNext()) {
                 sql.append(" , ");
             }
