@@ -154,6 +154,12 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
                         });
         metricsLoggerScheduler.scheduleAtFixedRate(
                 () -> {
+                    if (!currentTaskRunning) {
+                        LOG.info(
+                                "Skipping logging stats since current binlog-read task is not running");
+                        return;
+                    }
+
                     Map<String, Map<String, AtomicInteger>> oldRecordsEmittedMap =
                             recordsEmittedMap;
                     recordsEmittedMap = new HashMap<>();
@@ -173,6 +179,21 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
                                             + ", "
                                             + e.getValue().intValue());
                         }
+                    }
+
+                    // detect any tables missing from binlog reading
+                    Set<String> expectedTables =
+                            new HashSet<>(statefulTaskContext.getSourceConfig().getTableList());
+                    LOG.info("Expected tables in binlog reading count: " + expectedTables.size());
+                    for (TableId tableId : finishedSplitsInfo.keySet()) {
+                        expectedTables.remove(tableId.identifier());
+                    }
+                    if (expectedTables.isEmpty()) {
+                        LOG.info("All expected tables are being read from binlog.");
+                    } else {
+                        LOG.error(
+                                "Following expected tables are not being read from binlog "
+                                        + expectedTables);
                     }
                 },
                 5,
