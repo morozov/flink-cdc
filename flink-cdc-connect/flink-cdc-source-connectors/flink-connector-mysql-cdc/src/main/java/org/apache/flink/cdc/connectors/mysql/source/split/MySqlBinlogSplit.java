@@ -186,11 +186,52 @@ public class MySqlBinlogSplit extends MySqlSplit {
         // this should be similar to appendFinishedSplitInfos, only replacing the splitinfos but
         // everything else same
         // re-calculate the starting binlog offset after the new table added
-        BinlogOffset startingOffset = binlogSplit.getStartingOffset();
+
+        // find new splits that did not exist
+        Set<String> oldExistingSplitIds =
+                binlogSplit.getFinishedSnapshotSplitInfos().stream()
+                        .map(FinishedSnapshotSplitInfo::getSplitId)
+                        .collect(Collectors.toSet());
+        List<FinishedSnapshotSplitInfo> newSplitsOnly = new ArrayList<>();
         for (FinishedSnapshotSplitInfo splitInfo : splitInfos) {
-            if (splitInfo.getHighWatermark().isBefore(startingOffset)) {
-                startingOffset = splitInfo.getHighWatermark();
+            if (!oldExistingSplitIds.contains(splitInfo.getSplitId())) {
+                newSplitsOnly.add(splitInfo);
             }
+        }
+        LOG.info(
+                "New splits extracted: "
+                        + newSplitsOnly.stream()
+                                .map(FinishedSnapshotSplitInfo::getSplitId)
+                                .collect(Collectors.toList()));
+
+        BinlogOffset newSplitsStartingOffset = null;
+        FinishedSnapshotSplitInfo lowestHMSplit = null;
+        for (FinishedSnapshotSplitInfo newSplit : newSplitsOnly) {
+            // calculate the starting offset based on new splits only (lowest of the highwatermark)
+            if (newSplitsStartingOffset == null) {
+                newSplitsStartingOffset = newSplit.getHighWatermark();
+                lowestHMSplit = newSplit;
+            } else if (newSplit.getHighWatermark().isBefore(newSplitsStartingOffset)) {
+                newSplitsStartingOffset = newSplit.getHighWatermark();
+                lowestHMSplit = newSplit;
+            }
+        }
+
+        // take the earliest of either the new table splits's starting offset or the last binlog
+        // offset read
+        BinlogOffset lastBinlogOffset = binlogSplit.getStartingOffset();
+        BinlogOffset startingOffset = newSplitsStartingOffset;
+        if (lastBinlogOffset.isBefore(newSplitsStartingOffset)) {
+            startingOffset = lastBinlogOffset;
+            LOG.info(
+                    "New binlog starting offset was set from last binlog offset position "
+                            + startingOffset);
+        } else {
+            LOG.info(
+                    "New binlog starting offset was set from new table: "
+                            + lowestHMSplit
+                            + ",  starting offset: "
+                            + startingOffset);
         }
 
         return new MySqlBinlogSplit(

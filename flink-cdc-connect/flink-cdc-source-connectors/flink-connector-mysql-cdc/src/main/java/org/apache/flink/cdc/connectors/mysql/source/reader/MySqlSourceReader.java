@@ -460,13 +460,13 @@ public class MySqlSourceReader<T>
                 uncompletedBinlogSplits.put(binlogSplit.splitId(), binlogSplit);
             } else if (receivedMetaGroupId == expectedMetaGroupId) {
                 List<FinishedSnapshotSplitInfo> newAddedMetadataGroup;
-                if (binlogSplit.getFinishedSnapshotSplitInfos().size()
+                if (binlogSplit.getTotalFinishedSplitSize()
                         <= sourceConfig.getSplitMetaGroupSize()) {
                     // there is only one meta group, so replace the existing
                     // FinishedSnapshotSplitInfos completely
                     LOG.info(
-                            "There is only one split group because table split size is {} and meta group size is {}. Switching to binlog split with new data.",
-                            binlogSplit.getFinishedSnapshotSplitInfos().size(),
+                            "There is only one split group because total tables split size is {} and meta group size is {}. Switching to binlog split with new data.",
+                            binlogSplit.getTotalFinishedSplitSize(),
                             sourceConfig.getSplitMetaGroupSize());
                     newAddedMetadataGroup =
                             metadataEvent.getMetaGroup().stream()
@@ -478,6 +478,10 @@ public class MySqlSourceReader<T>
                                     binlogSplit, newAddedMetadataGroup));
 
                 } else {
+                    LOG.info(
+                            "There are multiple split groups because total tables split size is {} and meta group size is {}. Appending new group to existing splits.",
+                            binlogSplit.getTotalFinishedSplitSize(),
+                            sourceConfig.getSplitMetaGroupSize());
                     Set<String> existedSplitsOfLastGroup =
                             getExistedSplitsOfLastGroup(
                                     binlogSplit.getFinishedSnapshotSplitInfos(),
