@@ -225,7 +225,24 @@ public class BinlogOffset implements Comparable<BinlogOffset>, Serializable {
         long serverId = this.getServerId();
         long targetServerId = that.getServerId();
 
-        if (serverId != targetServerId) {
+        // there are cases where snapshotsplit's offset do not have serverid.
+        // this happens when, during snapshot phase, between low watermark and
+        // high watermark there is no advancement in binlog. In those cases
+        // snapshot will not do actual binlog reading. So the synthetic
+        // binlogoffset created for the snapshotsplit will not have proper
+        // serverid and ts is set to 0. They have binlog file, position and
+        // gtid only.
+        // The issue here is when there is no serverid (or serverid mismatch)
+        // the comparison is based on timestamp (not the binlog file and
+        // position). In this case, the snapshot split's HWM will always be
+        // the lowest HWM. This creates missing data case when the
+        // binlog-split's starting offset is actually the smaller offset
+        // since they always have the serverid and actual ts.
+        // We compensate for this case by checking that none of the server ids
+        // are 0 - unassigned if we are to do the timestamp based match.
+        // If any of the server id is 0, we cannot do timestamp match and fallback
+        // to do binlog filename and position based match
+        if (serverId != 0 && targetServerId != 0 && serverId != targetServerId) {
             // These are from different servers, and their binlog coordinates are not related. So
             // the only thing we can do
             // is compare timestamps, and we have to assume that the server timestamps can be
