@@ -29,7 +29,7 @@ limitations under the License.
 
     <groupId>org.apache.flink</groupId>
     <artifactId>flink-cdc-parent</artifactId>
-    <version>${revision}</version>
+    <version>3.1.1-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <modules>
@@ -58,7 +58,7 @@ limitations under the License.
     </scm>
 
     <properties>
-        <revision>3.1-SNAPSHOT</revision>
+        <revision>3.1.1-SNAPSHOT</revision>
         <java.version>1.8</java.version>
         <scala.binary.version>2.12</scala.binary.version>
         <maven.compiler.source>${java.version}</maven.compiler.source>
@@ -360,7 +360,7 @@ limitations under the License.
                     </execution>
                 </executions>
             </plugin>
-
+            
             <plugin>
                 <groupId>org.apache.rat</groupId>
                 <artifactId>apache-rat-plugin</artifactId>
@@ -415,6 +415,7 @@ limitations under the License.
                     <excludes>
                         <!-- Additional files like .gitignore etc.-->
                         <exclude>**/README.md</exclude>
+                        <exclude>**/README-decodable.md</exclude>
                         <exclude>**/.*/**</exclude>
                         <!-- Generated content -->
                         <exclude>**/target/**</exclude>
@@ -699,7 +700,7 @@ limitations under the License.
                     <dependency>
                         <groupId>org.apache.flink</groupId>
                         <artifactId>flink-cdc-ci-tools</artifactId>
-                        <version>${revision}</version>
+                        <version>3.1.1-SNAPSHOT</version>
                     </dependency>
                 </dependencies>
             </plugin>

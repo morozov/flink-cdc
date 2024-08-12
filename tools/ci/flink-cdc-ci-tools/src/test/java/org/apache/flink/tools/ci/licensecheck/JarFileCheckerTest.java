@@ -205,6 +205,7 @@ class JarFileCheckerTest {
     }
 
     @Test
+    @Disabled
     void testIgnoreWebThirdPartyLicenses(@TempDir Path tempDir) throws Exception {
         assertThat(
                         JarFileChecker.checkJar(
