@@ -27,6 +27,7 @@ import org.apache.flink.cdc.connectors.mysql.source.split.MySqlSplit;
 import org.apache.flink.cdc.connectors.mysql.source.split.SourceRecords;
 import org.apache.flink.cdc.connectors.mysql.source.utils.ChunkUtils;
 import org.apache.flink.cdc.connectors.mysql.source.utils.RecordUtils;
+import org.apache.flink.cdc.connectors.mysql.source.utils.StatementUtils;
 import org.apache.flink.cdc.connectors.mysql.table.StartupMode;
 import org.apache.flink.cdc.connectors.mysql.table.StartupOptions;
 import org.apache.flink.table.types.logical.RowType;
@@ -36,16 +37,6 @@ import org.apache.flink.shaded.guava31.com.google.common.util.concurrent.ThreadF
 
 import com.github.shyiko.mysql.binlog.event.Event;
 import com.github.shyiko.mysql.binlog.event.EventType;
-import com.ververica.cdc.connectors.mysql.debezium.task.MySqlBinlogSplitReadTask;
-import com.ververica.cdc.connectors.mysql.debezium.task.context.StatefulTaskContext;
-import com.ververica.cdc.connectors.mysql.source.offset.BinlogOffset;
-import com.ververica.cdc.connectors.mysql.source.split.FinishedSnapshotSplitInfo;
-import com.ververica.cdc.connectors.mysql.source.split.MySqlBinlogSplit;
-import com.ververica.cdc.connectors.mysql.source.split.MySqlSplit;
-import com.ververica.cdc.connectors.mysql.source.split.SourceRecords;
-import com.ververica.cdc.connectors.mysql.source.utils.ChunkUtils;
-import com.ververica.cdc.connectors.mysql.source.utils.RecordUtils;
-import com.ververica.cdc.connectors.mysql.source.utils.StatementUtils;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.connector.mysql.MySqlStreamingChangeEventSourceMetrics;
 import io.debezium.data.Envelope;
@@ -85,9 +76,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 
-import static com.ververica.cdc.connectors.mysql.source.utils.RecordUtils.getBinlogPositionWithoutServerId;
-import static com.ververica.cdc.connectors.mysql.source.utils.RecordUtils.getTableId;
-import static com.ververica.cdc.connectors.mysql.source.utils.RecordUtils.isDataChangeRecord;
+import static org.apache.flink.cdc.connectors.mysql.source.utils.RecordUtils.getBinlogPositionWithoutServerId;
+import static org.apache.flink.cdc.connectors.mysql.source.utils.RecordUtils.getTableId;
+import static org.apache.flink.cdc.connectors.mysql.source.utils.RecordUtils.isDataChangeRecord;
 
 /**
  * A Debezium binlog reader implementation that also support reads binlog and filter overlapping
