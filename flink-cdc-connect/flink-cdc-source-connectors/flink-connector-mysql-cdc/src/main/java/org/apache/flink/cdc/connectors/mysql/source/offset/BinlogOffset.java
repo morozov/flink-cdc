@@ -252,7 +252,8 @@ public class BinlogOffset implements Comparable<BinlogOffset>, Serializable {
             return Long.compare(timestamp, targetTimestamp);
         }
 
-        // First compare the MySQL binlog filenames. These can be null for synthetically-created offsets, e.g. in the
+        // First compare the MySQL binlog filenames. These can be null for synthetically-created
+        // offsets, e.g. in the
         // case of 'initial-offset' and 'timestamp' scan-startup-modes
         String thisFilename = this.getFilename();
         String thatFilename = that.getFilename();
