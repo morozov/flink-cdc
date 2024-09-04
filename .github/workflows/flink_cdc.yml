@@ -123,7 +123,7 @@ jobs:
             -Dexec.args="${{ env.MVN_BUILD_OUTPUT_FILE }} $(pwd) ${{ env.MVN_VALIDATION_DIR }}"
 
   migration_test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04-4core
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4

@@ -40,6 +40,7 @@ import org.apache.flink.cdc.connectors.mysql.testutils.MySqlContainer;
 import org.apache.flink.cdc.connectors.mysql.testutils.MySqlVersion;
 import org.apache.flink.cdc.connectors.mysql.testutils.RecordsFormatter;
 import org.apache.flink.cdc.connectors.mysql.testutils.UniqueDatabase;
+import org.apache.flink.connector.testutils.source.reader.TestingReaderContext;
 import org.apache.flink.core.testutils.CommonTestUtils;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.types.DataType;
@@ -900,9 +901,15 @@ public class BinlogSplitReaderTest extends MySqlSourceTestBase {
         return new BinlogSplitReader(
                 skipValidStartingOffset
                         ? new TestStatefulTaskContext(
-                                sourceConfig, binaryLogClient, mySqlConnection, null)
+                                sourceConfig,
+                                binaryLogClient,
+                                mySqlConnection,
+                                new MySqlSourceReaderContext(new TestingReaderContext()))
                         : new StatefulTaskContext(
-                                sourceConfig, binaryLogClient, mySqlConnection, null),
+                                sourceConfig,
+                                binaryLogClient,
+                                mySqlConnection,
+                                new MySqlSourceReaderContext(new TestingReaderContext())),
                 0);
     }
 
@@ -968,7 +975,11 @@ public class BinlogSplitReaderTest extends MySqlSourceTestBase {
             TableId binlogChangeTableId)
             throws Exception {
         final StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
+                new StatefulTaskContext(
+                        sourceConfig,
+                        binaryLogClient,
+                        mySqlConnection,
+                        new MySqlSourceReaderContext(new TestingReaderContext()));
         final SnapshotSplitReader snapshotSplitReader =
                 new SnapshotSplitReader(statefulTaskContext, 0);
 

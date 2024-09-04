@@ -298,7 +298,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
                 };
 
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
 
         SnapshotPhaseHooks snapshotHooks = new SnapshotPhaseHooks();
         snapshotHooks.setPreHighWatermarkAction(
@@ -358,7 +358,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
                 };
 
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
         SnapshotPhaseHooks snapshotHooks = new SnapshotPhaseHooks();
         snapshotHooks.setPostLowWatermarkAction(
                 (mySqlConnection, split) -> {
@@ -420,7 +420,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
                 };
 
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
         SnapshotPhaseHooks snapshotHooks = new SnapshotPhaseHooks();
         snapshotHooks.setPreHighWatermarkAction(
                 (mySqlConnection, split) -> {
@@ -473,7 +473,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
                 };
 
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
 
         SnapshotPhaseHooks snapshotHooks = new SnapshotPhaseHooks();
         snapshotHooks.setPostLowWatermarkAction(
@@ -528,7 +528,7 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
                 };
 
         StatefulTaskContext statefulTaskContext =
-                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection);
+                new StatefulTaskContext(sourceConfig, binaryLogClient, mySqlConnection, null);
 
         SnapshotPhaseHooks snapshotHooks = new SnapshotPhaseHooks();
         snapshotHooks.setPreHighWatermarkAction(
@@ -683,48 +683,5 @@ public class SnapshotSplitReaderTest extends MySqlSourceTestBase {
             return false;
         }
         return true;
-    }
-
-    static class MakeBinlogEventTaskContext extends StatefulTaskContext {
-
-        private final Supplier<Boolean> makeBinlogFunction;
-
-        public MakeBinlogEventTaskContext(
-                MySqlSourceConfig sourceConfig,
-                BinaryLogClient binaryLogClient,
-                MySqlConnection connection,
-                Supplier<Boolean> makeBinlogFunction) {
-            super(sourceConfig, binaryLogClient, connection, null);
-            this.makeBinlogFunction = makeBinlogFunction;
-        }
-
-        @Override
-        public EventDispatcher.SnapshotReceiver<MySqlPartition> getSnapshotReceiver() {
-            EventDispatcher.SnapshotReceiver<MySqlPartition> snapshotReceiver =
-                    super.getSnapshotReceiver();
-            return new EventDispatcher.SnapshotReceiver<MySqlPartition>() {
-
-                @Override
-                public void changeRecord(
-                        MySqlPartition partition,
-                        DataCollectionSchema schema,
-                        Envelope.Operation operation,
-                        Object key,
-                        Struct value,
-                        OffsetContext offset,
-                        ConnectHeaders headers)
-                        throws InterruptedException {
-                    snapshotReceiver.changeRecord(
-                            partition, schema, operation, key, value, offset, headers);
-                }
-
-                @Override
-                public void completeSnapshot() throws InterruptedException {
-                    snapshotReceiver.completeSnapshot();
-                    // make binlog events
-                    makeBinlogFunction.get();
-                }
-            };
-        }
     }
 }
