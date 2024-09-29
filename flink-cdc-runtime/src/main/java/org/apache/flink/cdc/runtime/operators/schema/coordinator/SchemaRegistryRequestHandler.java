@@ -348,6 +348,12 @@ public class SchemaRegistryRequestHandler implements Closeable {
         if (schemaChangeThreadPool != null) {
             schemaChangeThreadPool.shutdown();
         }
+
+        try {
+            metadataApplier.close();
+        } catch (Exception e) {
+            throw new IOException("Failed to close metadata applier.", e);
+        }
     }
 
     private List<SchemaChangeEvent> calculateDerivedSchemaChangeEvents(SchemaChangeEvent event) {
