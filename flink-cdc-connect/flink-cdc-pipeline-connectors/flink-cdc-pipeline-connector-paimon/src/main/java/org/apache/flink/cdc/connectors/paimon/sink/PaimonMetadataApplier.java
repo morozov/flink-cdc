@@ -148,6 +148,7 @@ public class PaimonMetadataApplier implements MetadataApplier {
                 });
     }
 
+    @Override
     public void close() throws Exception {
         if (catalog != null) {
             catalog.close();
