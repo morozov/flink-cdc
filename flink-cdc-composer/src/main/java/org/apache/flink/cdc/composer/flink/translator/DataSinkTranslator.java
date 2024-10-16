@@ -116,7 +116,7 @@ public class DataSinkTranslator {
         }
 
         if (sink instanceof TwoPhaseCommittingSink) {
-            addCommittingTopology(sink, stream, sinkName, schemaOperatorID);
+            addCommittingTopology((TwoPhaseCommittingSink<Event, ?>) sink, stream, sinkName, schemaOperatorID);
         } else {
             stream.transform(
                     SINK_WRITER_PREFIX + sinkName,
@@ -144,12 +144,12 @@ public class DataSinkTranslator {
     }
 
     private <CommT> void addCommittingTopology(
-            Sink<Event> sink,
+            TwoPhaseCommittingSink<Event, CommT> sink,
             DataStream<Event> inputStream,
             String sinkName,
             OperatorID schemaOperatorID) {
         TypeInformation<CommittableMessage<CommT>> typeInformation =
-                CommittableMessageTypeInfo.of(() -> getCommittableSerializer(sink));
+                CommittableMessageTypeInfo.of(sink::getCommittableSerializer);
         DataStream<CommittableMessage<CommT>> written =
                 inputStream.transform(
                         SINK_WRITER_PREFIX + sinkName,
