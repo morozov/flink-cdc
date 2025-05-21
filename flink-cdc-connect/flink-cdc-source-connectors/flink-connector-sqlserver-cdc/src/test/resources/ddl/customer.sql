@@ -23,14 +23,14 @@ CREATE DATABASE customer;
 USE customer;
 EXEC sys.sp_cdc_enable_db;
 
-CREATE TABLE customers (
+CREATE TABLE [customers [1]]] (
   id INTEGER NOT NULL PRIMARY KEY,
   name VARCHAR(255) NOT NULL DEFAULT 'flink',
   address VARCHAR(1024),
   phone_number VARCHAR(512)
 );
 
-INSERT INTO customers
+INSERT INTO [customers [1]]]
 VALUES (101,'user_1','Shanghai','123567891234'),
        (102,'user_2','Shanghai','123567891234'),
        (103,'user_3','Shanghai','123567891234'),
@@ -52,7 +52,7 @@ VALUES (101,'user_1','Shanghai','123567891234'),
        (1018,'user_19','Shanghai','123567891234'),
        (1019,'user_20','Shanghai','123567891234'),
        (2000,'user_21','Shanghai','123567891234');
-EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'customers', @role_name = NULL, @supports_net_changes = 0;
+EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'customers [1]', @role_name = NULL, @supports_net_changes = 0;
 
 -- table has same name prefix with 'customers.*'
 CREATE TABLE customers_1 (

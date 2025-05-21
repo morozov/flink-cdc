@@ -36,7 +36,6 @@ import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 
 import io.debezium.jdbc.JdbcConnection;
-import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -50,6 +49,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static java.lang.String.format;
@@ -71,44 +71,44 @@ class SqlServerSourceITCase extends SqlServerSourceTestBase {
     @Test
     void testReadSingleTableWithSingleParallelism() throws Exception {
         testSqlServerParallelSource(
-                1, FailoverType.NONE, FailoverPhase.NEVER, new String[] {"dbo.customers"});
+                1, FailoverType.NONE, FailoverPhase.NEVER, new String[] {"dbo.customers [1]"});
     }
 
     @Test
     void testReadSingleTableWithMultipleParallelism() throws Exception {
         testSqlServerParallelSource(
-                4, FailoverType.NONE, FailoverPhase.NEVER, new String[] {"dbo.customers"});
+                4, FailoverType.NONE, FailoverPhase.NEVER, new String[] {"dbo.customers [1]"});
     }
 
     // Failover tests
     @Test
     void testTaskManagerFailoverInSnapshotPhase() throws Exception {
         testSqlServerParallelSource(
-                FailoverType.TM, FailoverPhase.SNAPSHOT, new String[] {"dbo.customers"});
+                FailoverType.TM, FailoverPhase.SNAPSHOT, new String[] {"dbo.customers [1]"});
     }
 
     @Test
     void testTaskManagerFailoverInBinlogPhase() throws Exception {
         testSqlServerParallelSource(
-                FailoverType.TM, FailoverPhase.STREAM, new String[] {"dbo.customers"});
+                FailoverType.TM, FailoverPhase.STREAM, new String[] {"dbo.customers [1]"});
     }
 
     @Test
     void testJobManagerFailoverInSnapshotPhase() throws Exception {
         testSqlServerParallelSource(
-                FailoverType.JM, FailoverPhase.SNAPSHOT, new String[] {"dbo.customers"});
+                FailoverType.JM, FailoverPhase.SNAPSHOT, new String[] {"dbo.customers [1]"});
     }
 
     @Test
     void testJobManagerFailoverInBinlogPhase() throws Exception {
         testSqlServerParallelSource(
-                FailoverType.JM, FailoverPhase.STREAM, new String[] {"dbo.customers"});
+                FailoverType.JM, FailoverPhase.STREAM, new String[] {"dbo.customers [1]"});
     }
 
     @Test
     void testJobManagerFailoverSingleParallelism() throws Exception {
         testSqlServerParallelSource(
-                1, FailoverType.JM, FailoverPhase.SNAPSHOT, new String[] {"dbo.customers"});
+                1, FailoverType.JM, FailoverPhase.SNAPSHOT, new String[] {"dbo.customers [1]"});
     }
 
     @Test
@@ -117,7 +117,7 @@ class SqlServerSourceITCase extends SqlServerSourceTestBase {
                 DEFAULT_PARALLELISM,
                 FailoverType.TM,
                 FailoverPhase.SNAPSHOT,
-                new String[] {"dbo.customers"},
+                new String[] {"dbo.customers [1]"},
                 true,
                 RestartStrategies.fixedDelayRestart(1, 0),
                 null);
@@ -285,7 +285,7 @@ class SqlServerSourceITCase extends SqlServerSourceTestBase {
                 1,
                 FailoverType.NONE,
                 FailoverPhase.NEVER,
-                new String[] {"dbo.customers"},
+                new String[] {"dbo.customers [1]"},
                 false,
                 RestartStrategies.noRestart(),
                 chunkColumn);
@@ -313,7 +313,8 @@ class SqlServerSourceITCase extends SqlServerSourceTestBase {
                                 physical("phone_number", STRING())),
                         new ArrayList<>(),
                         UniqueConstraint.primaryKey("pk", Collections.singletonList("id")));
-        TestTable customerTable = new TestTable(databaseName, "dbo", "customers", customersSchema);
+        TestTable customerTable =
+                new TestTable(databaseName, "dbo", "customers [1]", customersSchema);
         String tableId = customerTable.getTableId();
 
         SqlServerSourceBuilder.SqlServerIncrementalSource source =
@@ -323,7 +324,7 @@ class SqlServerSourceITCase extends SqlServerSourceTestBase {
                         .username(MSSQL_SERVER_CONTAINER.getUsername())
                         .password(MSSQL_SERVER_CONTAINER.getPassword())
                         .databaseList(databaseName)
-                        .tableList(getTableNameRegex(new String[] {"dbo.customers"}))
+                        .tableList(getTableNameRegex(new String[] {"dbo.customers [1]"}))
                         .deserializer(customerTable.getDeserializer())
                         .skipSnapshotBackfill(skipSnapshotBackfill)
                         .build();
@@ -571,11 +572,10 @@ class SqlServerSourceITCase extends SqlServerSourceTestBase {
 
     private String getTableNameRegex(String[] captureCustomerTables) {
         checkState(captureCustomerTables.length > 0);
-        if (captureCustomerTables.length == 1) {
-            return captureCustomerTables[0];
-        } else {
-            // pattern that matches multiple tables
-            return format("(%s)", StringUtils.join(captureCustomerTables, ","));
-        }
+        return format(
+                "(%s)",
+                Arrays.stream(captureCustomerTables)
+                        .map(Pattern::quote)
+                        .collect(Collectors.joining(",")));
     }
 }
