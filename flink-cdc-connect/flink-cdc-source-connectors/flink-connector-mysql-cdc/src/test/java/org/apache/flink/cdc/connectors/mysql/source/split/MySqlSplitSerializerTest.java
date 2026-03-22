@@ -36,6 +36,9 @@ import java.util.List;
 import java.util.Map;
 
 import static org.apache.flink.cdc.connectors.mysql.source.split.MySqlBinlogSplit.toSuspendedBinlogSplit;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 /** Tests for {@link org.apache.flink.cdc.connectors.mysql.source.split.MySqlSplitSerializer}. */
 class MySqlSplitSerializerTest {
@@ -99,7 +102,7 @@ class MySqlSplitSerializerTest {
                         BinlogOffset.ofNonStopping(),
                         finishedSplitsInfo,
                         databaseHistory,
-                        finishedSplitsInfo.size());
+                        MySqlBinlogSplit.Digest.of(finishedSplitsInfo));
         Assertions.assertThat(serializeAndDeserializeSplit(split)).isEqualTo(split);
 
         final MySqlSplit suspendedBinlogSplit = toSuspendedBinlogSplit(split.asBinlogSplit());
@@ -113,7 +116,7 @@ class MySqlSplitSerializerTest {
                         BinlogOffset.ofNonStopping(),
                         new ArrayList<>(),
                         new HashMap<>(),
-                        0);
+                        MySqlBinlogSplit.Digest.empty());
         Assertions.assertThat(serializeAndDeserializeSplit(unCompletedBinlogSplit))
                 .isEqualTo(unCompletedBinlogSplit);
     }
@@ -134,6 +137,73 @@ class MySqlSplitSerializerTest {
         final byte[] ser1 = MySqlSplitSerializer.INSTANCE.serialize(split);
         final byte[] ser2 = MySqlSplitSerializer.INSTANCE.serialize(split);
         Assertions.assertThat(ser1).isSameAs(ser2);
+    }
+
+    @Test
+    public void testDeserializeCompleteBinlogSplitFromV4() throws Exception {
+        final TableId tableId = TableId.parse("customer");
+
+        final List<FinishedSnapshotSplitInfo> finishedSplitsInfos = new ArrayList<>();
+        finishedSplitsInfos.add(
+                new FinishedSnapshotSplitInfo(
+                        tableId,
+                        "snapshot-split-1",
+                        null,
+                        null,
+                        BinlogOffset.ofBinlogFilePosition("mysql-bin.000001", 4L)));
+
+        final MySqlBinlogSplit split =
+                new MySqlBinlogSplit(
+                        "binlog-split",
+                        BinlogOffset.ofEarliest(),
+                        BinlogOffset.ofLatest(),
+                        finishedSplitsInfos,
+                        Collections.emptyMap(),
+                        MySqlBinlogSplit.Digest.of(finishedSplitsInfos));
+        assertTrue(split.isCompletedSplit());
+
+        final MySqlSplitSerializer serializer = new MySqlSplitSerializer();
+        byte[] bytes = serializer.serialize(4, split);
+        final MySqlBinlogSplit deserialized = (MySqlBinlogSplit) serializer.deserialize(4, bytes);
+
+        assertEquals(1, deserialized.getDigest().getTotalNumberOfFinishedSnapshotSplits());
+        assertEquals(finishedSplitsInfos, deserialized.getFinishedSnapshotSplitInfos());
+        assertTrue(deserialized.isCompletedSplit());
+    }
+
+    @Test
+    public void testDeserializeInCompleteBinlogSplitFromV4() throws Exception {
+        final TableId tableId = TableId.parse("customer");
+
+        int totalNumberOfFinishedSnapshotSplits = 2;
+
+        final List<FinishedSnapshotSplitInfo> finishedSplitsInfos = new ArrayList<>();
+        finishedSplitsInfos.add(
+                new FinishedSnapshotSplitInfo(
+                        tableId,
+                        "snapshot-split-1",
+                        null,
+                        null,
+                        BinlogOffset.ofBinlogFilePosition("mysql-bin.000001", 4L)));
+
+        final MySqlBinlogSplit split =
+                new MySqlBinlogSplit(
+                        "binlog-split",
+                        BinlogOffset.ofEarliest(),
+                        BinlogOffset.ofLatest(),
+                        finishedSplitsInfos,
+                        Collections.emptyMap(),
+                        new MySqlBinlogSplit.Digest(totalNumberOfFinishedSnapshotSplits, 0));
+        assertFalse(split.isCompletedSplit());
+
+        final MySqlSplitSerializer serializer = new MySqlSplitSerializer();
+        byte[] bytes = serializer.serialize(4, split);
+        final MySqlBinlogSplit deserialized = (MySqlBinlogSplit) serializer.deserialize(4, bytes);
+
+        assertEquals(
+                totalNumberOfFinishedSnapshotSplits,
+                deserialized.getDigest().getTotalNumberOfFinishedSnapshotSplits());
+        assertFalse(deserialized.isCompletedSplit());
     }
 
     private MySqlSplit serializeAndDeserializeSplit(MySqlSplit split) throws Exception {

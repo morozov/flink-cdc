@@ -134,6 +134,6 @@ public class MySqlBinlogSplitAssigner implements MySqlSplitAssigner {
                 BinlogOffset.ofNonStopping(),
                 new ArrayList<>(),
                 new HashMap<>(),
-                0);
+                MySqlBinlogSplit.Digest.empty());
     }
 }

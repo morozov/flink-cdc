@@ -38,7 +38,7 @@ import java.util.Map;
 class MySqlBinlogSplitTest {
 
     @Test
-    void filterOutdatedSplitInfos() {
+    void withoutIrrelevantTableSchemas() {
         Map<TableId, TableChanges.TableChange> tableSchemas = new HashMap<>();
 
         // mock table1
@@ -65,16 +65,13 @@ class MySqlBinlogSplitTest {
                         null,
                         new ArrayList<>(),
                         tableSchemas,
-                        0,
-                        false);
-        String expectedTables = "[catalog1.table1, catalog2.table2]";
-        Assertions.assertThat(binlogSplit.getTables()).isEqualTo(expectedTables);
+                        MySqlBinlogSplit.Digest.empty());
 
         // case 1: only include table1
         Tables.TableFilter currentTableFilter = tableId -> tableId.table().equals("table1");
 
         MySqlBinlogSplit mySqlBinlogSplit =
-                MySqlBinlogSplit.filterOutdatedSplitInfos(binlogSplit, currentTableFilter);
+                binlogSplit.withoutIrrelevantTableSchemas(currentTableFilter);
         Map<TableId, TableChanges.TableChange> filterTableSchemas =
                 mySqlBinlogSplit.getTableSchemas();
         Assertions.assertThat(filterTableSchemas).hasSize(1).containsEntry(tableId1, tableChange1);
@@ -84,8 +81,7 @@ class MySqlBinlogSplitTest {
         // case 2: include all tables
         currentTableFilter = tableId -> tableId.table().startsWith("table");
 
-        mySqlBinlogSplit =
-                MySqlBinlogSplit.filterOutdatedSplitInfos(binlogSplit, currentTableFilter);
+        mySqlBinlogSplit = binlogSplit.withoutIrrelevantTableSchemas(currentTableFilter);
         filterTableSchemas = mySqlBinlogSplit.getTableSchemas();
         Assertions.assertThat(filterTableSchemas)
                 .hasSize(2)
@@ -169,8 +165,7 @@ class MySqlBinlogSplitTest {
                                         null,
                                         infos,
                                         Collections.emptyMap(),
-                                        0,
-                                        false))
+                                        MySqlBinlogSplit.Digest.empty()))
                 .isExactlyInstanceOf(IllegalArgumentException.class);
     }
 

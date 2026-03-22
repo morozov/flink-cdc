@@ -29,13 +29,13 @@ import org.apache.flink.cdc.connectors.mysql.source.config.MySqlSourceConfig;
 import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitAssignedEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitMetaEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitMetaRequestEvent;
+import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitMetadataDigestEvent;
+import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitMetadataDigestRequestEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitUpdateAckEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitUpdateRequestEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.FinishedSnapshotSplitsAckEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.FinishedSnapshotSplitsReportEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.FinishedSnapshotSplitsRequestEvent;
-import org.apache.flink.cdc.connectors.mysql.source.events.LatestFinishedSplitsNumberEvent;
-import org.apache.flink.cdc.connectors.mysql.source.events.LatestFinishedSplitsNumberRequestEvent;
 import org.apache.flink.cdc.connectors.mysql.source.offset.BinlogOffset;
 import org.apache.flink.cdc.connectors.mysql.source.split.FinishedSnapshotSplitInfo;
 import org.apache.flink.cdc.connectors.mysql.source.split.MySqlBinlogSplit;
@@ -78,7 +78,12 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
 
     // using TreeSet to prefer assigning binlog split to task-0 for easier debug
     private final TreeSet<Integer> readersAwaitingSplit;
-    private List<List<FinishedSnapshotSplitInfo>> binlogSplitMeta;
+
+    /** The binlog offset for which the current {@link #binlogSplitMetadata} was generated. */
+    @Nullable private BinlogOffset latestBinlogOffset;
+
+    /** The metadata of the binlog split to be replicated to the source reader. */
+    @Nullable private BinlogSplitMetadata binlogSplitMetadata;
 
     @Nullable private Integer binlogSplitTaskId;
 
@@ -170,11 +175,12 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
                     "The enumerator receives event that the binlog split has been updated from subtask {}. ",
                     subtaskId);
             splitAssigner.onBinlogSplitUpdated();
-        } else if (sourceEvent instanceof LatestFinishedSplitsNumberRequestEvent) {
+        } else if (sourceEvent instanceof BinlogSplitMetadataDigestRequestEvent) {
             LOG.info(
-                    "The enumerator receives request from subtask {} for the latest finished splits number after added newly tables. ",
+                    "The enumerator receives request for the binlog split metadata digest from subtask {}.",
                     subtaskId);
-            handleLatestFinishedSplitNumberRequest(subtaskId);
+            handleBinlogSplitMetadataDigestRequest(
+                    subtaskId, (BinlogSplitMetadataDigestRequestEvent) sourceEvent);
         } else if (sourceEvent instanceof BinlogSplitAssignedEvent) {
             LOG.info(
                     "The enumerator receives notice from subtask {} for the binlog split assignment. ",
@@ -290,65 +296,135 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
         }
     }
 
+    /**
+     * Returns the current binlog split metadata, generating a new one if the binlog offset changed.
+     */
+    private BinlogSplitMetadata getBinlogSplitMetadata(BinlogOffset currentBinlogOffset) {
+        if (!currentBinlogOffset.equals(latestBinlogOffset)) {
+            binlogSplitMetadata =
+                    new BinlogSplitMetadata(
+                            splitAssigner.getFinishedSplitInfos(),
+                            currentBinlogOffset,
+                            sourceConfig.getSplitMetaGroupSize());
+            latestBinlogOffset = currentBinlogOffset;
+        }
+
+        return binlogSplitMetadata;
+    }
+
     private void sendBinlogMeta(int subTask, BinlogSplitMetaRequestEvent requestEvent) {
-        // initialize once
-        if (binlogSplitMeta == null) {
-            final List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos =
-                    splitAssigner.getFinishedSplitInfos();
+        BinlogSplitMetadata metadata =
+                getBinlogSplitMetadata(requestEvent.getCurrentBinlogOffset());
+        final int requestMetaGroupId = requestEvent.getRequestMetaGroupId();
+        final MySqlBinlogSplit.Digest expectedDigest = requestEvent.getExpectedDigest();
+        final MySqlBinlogSplit.Digest actualDigest = metadata.getDigest();
+        if (!expectedDigest.equals(actualDigest)) {
+            LOG.info(
+                    "The binlog split metadata digest expected by subtask {} is {}, while the digest on the enumerator is {}. Sending the actual metadata digest to the subtask.",
+                    subTask,
+                    expectedDigest,
+                    actualDigest);
+            BinlogSplitMetaEvent event =
+                    new BinlogSplitMetaEvent(
+                            requestEvent.getSplitId(), requestMetaGroupId, null, actualDigest);
+            context.sendEventToSourceReader(subTask, event);
+            return;
+        }
+
+        BinlogSplitMetaEvent metadataEvent =
+                new BinlogSplitMetaEvent(
+                        requestEvent.getSplitId(),
+                        requestMetaGroupId,
+                        metadata.getGroup(requestMetaGroupId)
+                                .orElseThrow(
+                                        () ->
+                                                new FlinkRuntimeException(
+                                                        String.format(
+                                                                "The enumerator received invalid request for binlog split metadata group id %s. The valid metadata group id range is [0, %s]",
+                                                                requestMetaGroupId,
+                                                                metadata.getNumberOfGroups() - 1)))
+                                .stream()
+                                .map(FinishedSnapshotSplitInfo::serialize)
+                                .collect(Collectors.toList()),
+                        actualDigest);
+        context.sendEventToSourceReader(subTask, metadataEvent);
+    }
+
+    private void handleBinlogSplitMetadataDigestRequest(
+            int subTask, BinlogSplitMetadataDigestRequestEvent event) {
+        if (splitAssigner instanceof MySqlHybridSplitAssigner) {
+            BinlogSplitMetadata metadata = getBinlogSplitMetadata(event.getCurrentBinlogOffset());
+            context.sendEventToSourceReader(
+                    subTask, new BinlogSplitMetadataDigestEvent(metadata.getDigest()));
+        }
+    }
+
+    /** The metadata of the binlog split to be replicated to the source reader. */
+    static class BinlogSplitMetadata {
+        private final List<List<FinishedSnapshotSplitInfo>> groups;
+        private final MySqlBinlogSplit.Digest digest;
+
+        public BinlogSplitMetadata(
+                List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos,
+                BinlogOffset currentBinlogReadingOffset,
+                int groupSize) {
             if (finishedSnapshotSplitInfos.isEmpty()) {
                 LOG.error(
                         "The assigner offers empty finished split information, this should not happen");
                 throw new FlinkRuntimeException(
                         "The assigner offers empty finished split information, this should not happen");
             }
-            binlogSplitMeta =
-                    Lists.partition(
-                            finishedSnapshotSplitInfos, sourceConfig.getSplitMetaGroupSize());
-        }
-        final int requestMetaGroupId = requestEvent.getRequestMetaGroupId();
-        final int totalFinishedSplitSizeOfReader = requestEvent.getTotalFinishedSplitSize();
-        final int totalFinishedSplitSizeOfEnumerator = splitAssigner.getFinishedSplitInfos().size();
-        if (totalFinishedSplitSizeOfReader > totalFinishedSplitSizeOfEnumerator) {
-            LOG.warn(
-                    "Total finished split size of subtask {} is {}, while total finished split size of Enumerator is only {}. Try to truncate it",
-                    subTask,
-                    totalFinishedSplitSizeOfReader,
-                    totalFinishedSplitSizeOfEnumerator);
-            BinlogSplitMetaEvent metadataEvent =
-                    new BinlogSplitMetaEvent(
-                            requestEvent.getSplitId(),
-                            requestMetaGroupId,
-                            null,
-                            totalFinishedSplitSizeOfEnumerator);
-            context.sendEventToSourceReader(subTask, metadataEvent);
-        } else if (binlogSplitMeta.size() > requestMetaGroupId) {
-            List<FinishedSnapshotSplitInfo> metaToSend = binlogSplitMeta.get(requestMetaGroupId);
-            BinlogSplitMetaEvent metadataEvent =
-                    new BinlogSplitMetaEvent(
-                            requestEvent.getSplitId(),
-                            requestMetaGroupId,
-                            metaToSend.stream()
-                                    .map(FinishedSnapshotSplitInfo::serialize)
-                                    .collect(Collectors.toList()),
-                            totalFinishedSplitSizeOfEnumerator);
-            context.sendEventToSourceReader(subTask, metadataEvent);
-        } else {
-            throw new FlinkRuntimeException(
-                    String.format(
-                            "The enumerator received invalid request meta group id %s, the valid meta group id range is [0, %s]. Total finished split size of reader is %s, while the total finished split size of enumerator is %s.",
-                            requestMetaGroupId,
-                            binlogSplitMeta.size() - 1,
-                            totalFinishedSplitSizeOfReader,
-                            totalFinishedSplitSizeOfEnumerator));
-        }
-    }
 
-    private void handleLatestFinishedSplitNumberRequest(int subTask) {
-        if (splitAssigner instanceof MySqlHybridSplitAssigner) {
-            context.sendEventToSourceReader(
-                    subTask,
-                    new LatestFinishedSplitsNumberEvent(
-                            splitAssigner.getFinishedSplitInfos().size()));
+            List<FinishedSnapshotSplitInfo> updatedFinishedSnapshotSplitInfos =
+                    forwardHighWatermarks(finishedSnapshotSplitInfos, currentBinlogReadingOffset);
+
+            groups = Lists.partition(updatedFinishedSnapshotSplitInfos, groupSize);
+            digest = MySqlBinlogSplit.Digest.of(updatedFinishedSnapshotSplitInfos);
+        }
+
+        public MySqlBinlogSplit.Digest getDigest() {
+            return digest;
+        }
+
+        public Optional<List<FinishedSnapshotSplitInfo>> getGroup(int groupId) {
+            return (groupId >= 0 && groupId < groups.size())
+                    ? Optional.of(groups.get(groupId))
+                    : Optional.empty();
+        }
+
+        public int getNumberOfGroups() {
+            return groups.size();
+        }
+
+        /**
+         * Forwards the high watermarks of the given {@link FinishedSnapshotSplitInfo}s to the
+         * current binlog reading offset.
+         *
+         * <p>This way, when a source reader start reading the binlog after replicating the new
+         * version of the binlog split metadata, it will not re-emit the events that it has already
+         * emitted.
+         */
+        private static List<FinishedSnapshotSplitInfo> forwardHighWatermarks(
+                List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos,
+                BinlogOffset currentBinlogReadingOffset) {
+            return finishedSnapshotSplitInfos.stream()
+                    .map(
+                            i -> {
+                                if (i.getHighWatermark().isBefore(currentBinlogReadingOffset)) {
+                                    // for split has started read binlog, forward its high watermark
+                                    // to
+                                    // the current binlog reading offset
+                                    return new FinishedSnapshotSplitInfo(
+                                            i.getTableId(),
+                                            i.getSplitId(),
+                                            i.getSplitStart(),
+                                            i.getSplitEnd(),
+                                            currentBinlogReadingOffset);
+                                }
+
+                                return i;
+                            })
+                    .collect(Collectors.toList());
         }
     }
 }

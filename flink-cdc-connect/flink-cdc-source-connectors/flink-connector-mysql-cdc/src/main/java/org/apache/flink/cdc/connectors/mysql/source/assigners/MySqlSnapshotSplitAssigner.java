@@ -287,6 +287,24 @@ public class MySqlSnapshotSplitAssigner implements MySqlSplitAssigner {
                     LOG.info("Found newly added tables, start capture newly added tables process");
 
                     remainingTables.addAll(newlyAddedTables);
+                }
+
+                if (!(newlyAddedTables.isEmpty() && tablesToRemove.isEmpty())
+                        && AssignerStatus.isAssigningFinished(assignerStatus)) {
+                    if (LOG.isInfoEnabled()) {
+                        List<String> changes = new ArrayList<>();
+                        if (!newlyAddedTables.isEmpty()) {
+                            changes.add(
+                                    String.format("%d table(s) added", newlyAddedTables.size()));
+                        }
+                        if (!tablesToRemove.isEmpty()) {
+                            changes.add(
+                                    String.format("%d table(s) removed", tablesToRemove.size()));
+                        }
+                        LOG.info(
+                                "Initializing binlog split update on source reader; changes: {}.",
+                                changes);
+                    }
                     this.startAssignNewlyAddedTables();
                 }
             } catch (Exception e) {

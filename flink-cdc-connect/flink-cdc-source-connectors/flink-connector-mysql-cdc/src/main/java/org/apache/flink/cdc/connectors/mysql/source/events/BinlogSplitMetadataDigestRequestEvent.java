@@ -19,30 +19,25 @@ package org.apache.flink.cdc.connectors.mysql.source.events;
 
 import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.cdc.connectors.mysql.source.enumerator.MySqlSourceEnumerator;
+import org.apache.flink.cdc.connectors.mysql.source.offset.BinlogOffset;
 import org.apache.flink.cdc.connectors.mysql.source.reader.MySqlSourceReader;
 
 /**
- * The {@link SourceEvent} that {@link MySqlSourceEnumerator} sends to {@link MySqlSourceReader} to
- * pass the latest finished snapshot splits number.
+ * The {@link SourceEvent} that {@link MySqlSourceReader} sends to {@link MySqlSourceEnumerator} to
+ * request the digest of the current state of the binlog split metadata.
  */
-public class LatestFinishedSplitsNumberEvent implements SourceEvent {
+public class BinlogSplitMetadataDigestRequestEvent implements SourceEvent {
 
     private static final long serialVersionUID = 1L;
-    private final int latestFinishedSplitsNumber;
 
-    public LatestFinishedSplitsNumberEvent(int latestFinishedSplitsNumber) {
-        this.latestFinishedSplitsNumber = latestFinishedSplitsNumber;
+    /** The current binlog offset of the reader. */
+    private final BinlogOffset currentBinlogOffset;
+
+    public BinlogSplitMetadataDigestRequestEvent(BinlogOffset currentBinlogOffset) {
+        this.currentBinlogOffset = currentBinlogOffset;
     }
 
-    public int getLatestFinishedSplitsNumber() {
-        return latestFinishedSplitsNumber;
-    }
-
-    @Override
-    public String toString() {
-        return "LatestFinishedSplitsNumberEvent{"
-                + "latestFinishedSplitsNumber="
-                + latestFinishedSplitsNumber
-                + '}';
+    public BinlogOffset getCurrentBinlogOffset() {
+        return currentBinlogOffset;
     }
 }

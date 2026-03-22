@@ -31,7 +31,6 @@ import io.debezium.document.DocumentWriter;
 import io.debezium.relational.TableId;
 import io.debezium.relational.history.TableChanges.TableChange;
 
-import java.io.EOFException;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -50,7 +49,7 @@ public final class MySqlSplitSerializer implements SimpleVersionedSerializer<MyS
 
     public static final MySqlSplitSerializer INSTANCE = new MySqlSplitSerializer();
 
-    private static final int VERSION = 4;
+    private static final int VERSION = 5;
     private static final ThreadLocal<DataOutputSerializer> SERIALIZER_CACHE =
             ThreadLocal.withInitial(() -> new DataOutputSerializer(64));
 
@@ -64,6 +63,17 @@ public final class MySqlSplitSerializer implements SimpleVersionedSerializer<MyS
 
     @Override
     public byte[] serialize(MySqlSplit split) throws IOException {
+        return serialize(VERSION, split);
+    }
+
+    /**
+     * An internal serialize method that allows specifying the version for upgrade testing purposes.
+     */
+    byte[] serialize(int version, MySqlSplit split) throws IOException {
+        if (version < 4 || version > VERSION) {
+            throw new IOException("Unsupported version: " + version);
+        }
+
         if (split.isSnapshotSplit()) {
             final MySqlSnapshotSplit snapshotSplit = split.asSnapshotSplit();
             // optimization: the splits lazily cache their own serialized form
@@ -96,6 +106,7 @@ public final class MySqlSplitSerializer implements SimpleVersionedSerializer<MyS
             if (binlogSplit.serializedFormCache != null) {
                 return binlogSplit.serializedFormCache;
             }
+            final MySqlBinlogSplit.Digest digest = binlogSplit.getDigest();
             final DataOutputSerializer out = SERIALIZER_CACHE.get();
             out.writeInt(BINLOG_SPLIT_FLAG);
             out.writeUTF(binlogSplit.splitId());
@@ -104,8 +115,13 @@ public final class MySqlSplitSerializer implements SimpleVersionedSerializer<MyS
             writeBinlogPosition(binlogSplit.getEndingOffset(), out);
             writeFinishedSplitsInfo(binlogSplit.getFinishedSnapshotSplitInfos(), out);
             writeTableSchemas(binlogSplit.getTableSchemas(), out);
-            out.writeInt(binlogSplit.getTotalFinishedSplitSize());
+            out.writeInt(digest.getTotalNumberOfFinishedSnapshotSplits());
             out.writeBoolean(binlogSplit.isSuspended());
+
+            if (version >= 5) {
+                out.writeInt(digest.getChecksum());
+            }
+
             final byte[] result = out.getCopyOfBuffer();
             out.clear();
             // optimization: cache the serialized from, so we avoid the byte work during repeated
@@ -122,6 +138,7 @@ public final class MySqlSplitSerializer implements SimpleVersionedSerializer<MyS
             case 2:
             case 3:
             case 4:
+            case 5:
                 return deserializeSplit(version, serialized);
             default:
                 throw new IOException("Unknown version: " + version);
@@ -161,17 +178,37 @@ public final class MySqlSplitSerializer implements SimpleVersionedSerializer<MyS
             List<FinishedSnapshotSplitInfo> finishedSplitsInfo =
                     readFinishedSplitsInfo(version, in);
             Map<TableId, TableChange> tableChangeMap = readTableSchemas(version, in);
-            int totalFinishedSplitSize = finishedSplitsInfo.size();
+            MySqlBinlogSplit.Digest digest = MySqlBinlogSplit.Digest.empty();
             boolean isSuspended = false;
             if (version >= 3) {
-                totalFinishedSplitSize = in.readInt();
-                if (version > 3) {
-                    try {
-                        isSuspended = in.readBoolean();
-                    } catch (EOFException e) {
-                        // cdc version <= v2.2.0 does not serialize isSuspended value, skip reading
-                        // it
-                    }
+                int totalFinishedSplitSize = in.readInt();
+                if (version >= 4) {
+                    isSuspended = in.readBoolean();
+                }
+
+                // Unlike the "version >= 4" block which is nested under "version >= 3", we keep
+                // this one at the same level, because its "else" logic applies to both versions 3
+                // and 4.
+                if (version >= 5) {
+                    int checksum = in.readInt();
+                    digest = new MySqlBinlogSplit.Digest(totalFinishedSplitSize, checksum);
+                } else if (finishedSplitsInfo.size() < totalFinishedSplitSize) {
+                    // If the split is incomplete, include the total number of finished snapshot
+                    // split infos into the digest. This will make the split recognized as
+                    // incomplete, trigger a re-sync and let the reader discover the actual
+                    // checksum.
+                    digest = new MySqlBinlogSplit.Digest(totalFinishedSplitSize, 0);
+                } else {
+                    // If the split is complete, compute the digest from the available metadata. The
+                    // reason is that the binlog split constructor does not allow to instantiate a
+                    // complete split with a mismatching checksum.
+                    //
+                    // Note: This means that if the connection being upgraded is affected by
+                    // FLINK-38270, and its binlog split is complete, the mismatch in the metadata
+                    // will not be detected during the upgrade. This is an acceptable tradeoff, as
+                    // the issue is rare. Such a connection will have to be fixed manually one last
+                    // time by removing and re-adding a table. This will trigger a full re-sync.
+                    digest = MySqlBinlogSplit.Digest.of(finishedSplitsInfo);
                 }
             }
             in.releaseArrays();
@@ -181,7 +218,7 @@ public final class MySqlSplitSerializer implements SimpleVersionedSerializer<MyS
                     endingOffset,
                     finishedSplitsInfo,
                     tableChangeMap,
-                    totalFinishedSplitSize,
+                    digest,
                     isSuspended);
         } else {
             throw new IOException("Unknown split kind: " + splitKind);
@@ -219,6 +256,7 @@ public final class MySqlSplitSerializer implements SimpleVersionedSerializer<MyS
                 case 2:
                 case 3:
                 case 4:
+                case 5:
                     final int len = in.readInt();
                     final byte[] bytes = new byte[len];
                     in.read(bytes);

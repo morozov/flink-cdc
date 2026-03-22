@@ -20,14 +20,27 @@ package org.apache.flink.cdc.connectors.mysql.source.events;
 import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.cdc.connectors.mysql.source.enumerator.MySqlSourceEnumerator;
 import org.apache.flink.cdc.connectors.mysql.source.reader.MySqlSourceReader;
+import org.apache.flink.cdc.connectors.mysql.source.split.MySqlBinlogSplit;
 
 /**
- * The {@link SourceEvent} that {@link MySqlSourceReader} sends to {@link MySqlSourceEnumerator} to
- * ask the latest finished snapshot splits number.
+ * The {@link SourceEvent} that {@link MySqlSourceEnumerator} sends to {@link MySqlSourceReader} to
+ * pass the digest of the current binlog split metadata.
  */
-public class LatestFinishedSplitsNumberRequestEvent implements SourceEvent {
-
+public class BinlogSplitMetadataDigestEvent implements SourceEvent {
     private static final long serialVersionUID = 1L;
 
-    public LatestFinishedSplitsNumberRequestEvent() {}
+    private final MySqlBinlogSplit.Digest digest;
+
+    public BinlogSplitMetadataDigestEvent(MySqlBinlogSplit.Digest digest) {
+        this.digest = digest;
+    }
+
+    public MySqlBinlogSplit.Digest getDigest() {
+        return digest;
+    }
+
+    @Override
+    public String toString() {
+        return "BinlogSplitMetadataDigestEvent{digest=" + digest + '}';
+    }
 }

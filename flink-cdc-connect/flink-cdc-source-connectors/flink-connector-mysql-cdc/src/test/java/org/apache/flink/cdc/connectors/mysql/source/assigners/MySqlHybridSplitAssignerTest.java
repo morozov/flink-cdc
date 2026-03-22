@@ -144,7 +144,7 @@ class MySqlHybridSplitAssignerTest extends MySqlSourceTestBase {
                         BinlogOffset.ofNonStopping(),
                         finishedSnapshotSplitInfos,
                         new HashMap<>(),
-                        finishedSnapshotSplitInfos.size());
+                        MySqlBinlogSplit.Digest.of(finishedSnapshotSplitInfos));
         Assertions.assertThat(mySqlBinlogSplit).isEqualTo(expected);
         assigner.close();
     }

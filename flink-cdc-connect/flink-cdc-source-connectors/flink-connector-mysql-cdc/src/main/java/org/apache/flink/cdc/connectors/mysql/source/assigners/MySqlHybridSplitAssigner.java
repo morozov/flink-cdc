@@ -250,6 +250,6 @@ public class MySqlHybridSplitAssigner implements MySqlSplitAssigner {
                 stoppingOffset,
                 divideMetaToGroups ? new ArrayList<>() : finishedSnapshotSplitInfos,
                 new HashMap<>(),
-                finishedSnapshotSplitInfos.size());
+                MySqlBinlogSplit.Digest.of(finishedSnapshotSplitInfos));
     }
 }

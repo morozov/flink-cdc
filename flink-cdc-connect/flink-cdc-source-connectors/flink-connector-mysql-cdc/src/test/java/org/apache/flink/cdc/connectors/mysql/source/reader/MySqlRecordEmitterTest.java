@@ -345,7 +345,7 @@ class MySqlRecordEmitterTest {
                         BinlogOffset.ofNonStopping(),
                         Collections.emptyList(),
                         Collections.emptyMap(),
-                        0));
+                        MySqlBinlogSplit.Digest.empty()));
     }
 
     /** Helper method to create a MySqlRecordEmitter that counts emitted records. */

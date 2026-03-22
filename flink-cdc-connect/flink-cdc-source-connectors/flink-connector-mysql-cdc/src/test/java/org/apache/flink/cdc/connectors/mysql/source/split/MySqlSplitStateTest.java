@@ -149,6 +149,6 @@ class MySqlSplitStateTest {
                 BinlogOffset.ofNonStopping(),
                 finishedSplitsInfo,
                 tableSchemas,
-                finishedSplitsInfo.size());
+                MySqlBinlogSplit.Digest.of(finishedSplitsInfo));
     }
 }

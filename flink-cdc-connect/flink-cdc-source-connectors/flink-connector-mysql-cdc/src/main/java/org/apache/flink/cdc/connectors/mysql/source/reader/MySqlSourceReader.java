@@ -24,13 +24,13 @@ import org.apache.flink.cdc.connectors.mysql.source.config.MySqlSourceConfig;
 import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitAssignedEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitMetaEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitMetaRequestEvent;
+import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitMetadataDigestEvent;
+import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitMetadataDigestRequestEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitUpdateAckEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.BinlogSplitUpdateRequestEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.FinishedSnapshotSplitsAckEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.FinishedSnapshotSplitsReportEvent;
 import org.apache.flink.cdc.connectors.mysql.source.events.FinishedSnapshotSplitsRequestEvent;
-import org.apache.flink.cdc.connectors.mysql.source.events.LatestFinishedSplitsNumberEvent;
-import org.apache.flink.cdc.connectors.mysql.source.events.LatestFinishedSplitsNumberRequestEvent;
 import org.apache.flink.cdc.connectors.mysql.source.offset.BinlogOffset;
 import org.apache.flink.cdc.connectors.mysql.source.split.FinishedSnapshotSplitInfo;
 import org.apache.flink.cdc.connectors.mysql.source.split.MySqlBinlogSplit;
@@ -59,8 +59,10 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -80,6 +82,7 @@ public class MySqlSourceReader<T>
     private volatile MySqlBinlogSplit suspendedBinlogSplit;
     private final MySqlRecordEmitter<T> recordEmitter;
     private final MySqlPartition partition;
+    private BinlogSplitMetaRequestEvent lastSentBinlogSplitMetaRequestEvent;
 
     public MySqlSourceReader(
             Supplier<MySqlSplitReader> splitReaderSupplier,
@@ -181,12 +184,13 @@ public class MySqlSourceReader<T>
                     if (mySqlSourceReaderContext.isBinlogSplitReaderSuspended()) {
                         suspendedBinlogSplit =
                                 MySqlBinlogSplit.toSuspendedBinlogSplit(mySqlSplit.asBinlogSplit());
+                        BinlogOffset currentBinlogOffset = suspendedBinlogSplit.getStartingOffset();
                         LOG.info(
-                                "Source reader {} suspended binlog split reader success after the newly added table process, current offset {}",
+                                "Source reader {} suspended the binlog split and is requesting its metadata digest; current binlog offset: {}",
                                 subtaskId,
-                                suspendedBinlogSplit.getStartingOffset());
+                                currentBinlogOffset);
                         context.sendSourceEventToCoordinator(
-                                new LatestFinishedSplitsNumberRequestEvent());
+                                new BinlogSplitMetadataDigestRequestEvent(currentBinlogOffset));
                         // do not request next split when the reader is suspended
                         requestNextSplit = false;
                     }
@@ -252,39 +256,52 @@ public class MySqlSourceReader<T>
                 }
             } else {
                 MySqlBinlogSplit binlogSplit = split.asBinlogSplit();
+                LOG.info(
+                        "Attempting to add binlog split {} with {} replicated table splits.",
+                        binlogSplit,
+                        binlogSplit.getFinishedSnapshotSplitInfos().size());
+
                 // When restore from a checkpoint, the finished split infos may contain some splits
                 // for the deleted tables.
                 // We need to remove these splits for the deleted tables at the finished split
                 // infos.
                 if (checkTableChangeForBinlogSplit) {
+                    Set<TableId> irrelevantTableIds =
+                            new HashSet<>(binlogSplit.getTableSchemas().keySet());
+
                     binlogSplit =
-                            MySqlBinlogSplit.filterOutdatedSplitInfos(
-                                    binlogSplit,
+                            binlogSplit.withoutIrrelevantTableSchemas(
                                     sourceConfig
                                             .getMySqlConnectorConfig()
                                             .getTableFilters()
                                             .dataCollectionFilter());
+
+                    irrelevantTableIds.removeAll(binlogSplit.getTableSchemas().keySet());
+
+                    if (!irrelevantTableIds.isEmpty() && LOG.isInfoEnabled()) {
+                        LOG.info(
+                                "Reader discarded irrelevant tables schemas: {}",
+                                irrelevantTableIds.stream().sorted().collect(Collectors.toList()));
+                    }
                 }
 
-                // Try to discovery table schema once for newly added tables when source reader
-                // start or restore
-                boolean checkNewlyAddedTableSchema =
-                        !mySqlSourceReaderContext.isHasAssignedBinlogSplit()
-                                && sourceConfig.isScanNewlyAddedTableEnabled();
                 mySqlSourceReaderContext.setHasAssignedBinlogSplit(true);
 
                 // the binlog split is suspended
                 if (binlogSplit.isSuspended()) {
                     suspendedBinlogSplit = binlogSplit;
                 } else if (!binlogSplit.isCompletedSplit()) {
+                    LOG.info("binlog split is not complete");
                     uncompletedBinlogSplits.put(binlogSplit.splitId(), binlogSplit);
                     requestBinlogSplitMetaIfNeeded(binlogSplit);
                 } else {
                     uncompletedBinlogSplits.remove(binlogSplit.splitId());
-                    MySqlBinlogSplit mySqlBinlogSplit =
+                    MySqlBinlogSplit binlogSplitWithSchemas =
                             discoverTableSchemasForBinlogSplit(
-                                    binlogSplit, sourceConfig, checkNewlyAddedTableSchema);
-                    unfinishedSplits.add(mySqlBinlogSplit);
+                                    binlogSplit,
+                                    sourceConfig,
+                                    sourceConfig.isScanNewlyAddedTableEnabled());
+                    unfinishedSplits.add(binlogSplitWithSchemas);
                 }
                 LOG.info(
                         "Source reader {} received the binlog split : {}.", subtaskId, binlogSplit);
@@ -331,8 +348,8 @@ public class MySqlSourceReader<T>
         } else if (sourceEvent instanceof BinlogSplitUpdateRequestEvent) {
             LOG.info("Source reader {} receives binlog split update event.", subtaskId);
             handleBinlogSplitUpdateRequest();
-        } else if (sourceEvent instanceof LatestFinishedSplitsNumberEvent) {
-            updateBinlogSplit((LatestFinishedSplitsNumberEvent) sourceEvent);
+        } else if (sourceEvent instanceof BinlogSplitMetadataDigestEvent) {
+            updateBinlogSplit((BinlogSplitMetadataDigestEvent) sourceEvent);
         } else {
             super.handleSourceEvents(sourceEvent);
         }
@@ -342,11 +359,14 @@ public class MySqlSourceReader<T>
         mySqlSourceReaderContext.suspendBinlogSplitReader();
     }
 
-    private void updateBinlogSplit(LatestFinishedSplitsNumberEvent sourceEvent) {
+    private void updateBinlogSplit(BinlogSplitMetadataDigestEvent event) {
         if (suspendedBinlogSplit != null) {
-            final int finishedSplitsSize = sourceEvent.getLatestFinishedSplitsNumber();
+            LOG.info(
+                    "Source reader {} received the new binlog split metadata digest: {}",
+                    subtaskId,
+                    event);
             final MySqlBinlogSplit binlogSplit =
-                    MySqlBinlogSplit.toNormalBinlogSplit(suspendedBinlogSplit, finishedSplitsSize);
+                    suspendedBinlogSplit.withNewDigest(event.getDigest());
             suspendedBinlogSplit = null;
             this.addSplits(Collections.singletonList(binlogSplit), false);
 
@@ -360,7 +380,7 @@ public class MySqlSourceReader<T>
                     "Source reader {} wakes up suspended binlog reader as binlog split has been updated.",
                     subtaskId);
         } else {
-            LOG.warn("Unexpected event {}, this should not happen.", sourceEvent);
+            LOG.warn("Unexpected event {}, this should not happen.", event);
         }
     }
 
@@ -387,9 +407,27 @@ public class MySqlSourceReader<T>
                     ChunkUtils.getNextMetaGroupId(
                             binlogSplit.getFinishedSnapshotSplitInfos().size(),
                             sourceConfig.getSplitMetaGroupSize());
+            final int totalNumberOfFinishedSnapshotSplits =
+                    binlogSplit.getDigest().getTotalNumberOfFinishedSnapshotSplits();
             BinlogSplitMetaRequestEvent splitMetaRequestEvent =
                     new BinlogSplitMetaRequestEvent(
-                            splitId, nextMetaGroupId, binlogSplit.getTotalFinishedSplitSize());
+                            splitId,
+                            nextMetaGroupId,
+                            binlogSplit.getStartingOffset(),
+                            binlogSplit.getDigest());
+            if (splitMetaRequestEvent.equals(lastSentBinlogSplitMetaRequestEvent)) {
+                throw new IllegalStateException(
+                        String.format(
+                                "Source reader is going to send the same binlog split meta request event %s.",
+                                splitMetaRequestEvent));
+            }
+            lastSentBinlogSplitMetaRequestEvent = splitMetaRequestEvent;
+            LOG.info(
+                    "Source reader {} is requesting binlog split metadata group {}: {} of {} total split-infos currently in reader's binlog-split",
+                    subtaskId,
+                    nextMetaGroupId,
+                    binlogSplit.getFinishedSnapshotSplitInfos().size(),
+                    totalNumberOfFinishedSnapshotSplits);
             context.sendSourceEventToCoordinator(splitMetaRequestEvent);
         } else {
             LOG.info("Source reader {} collects meta of binlog split success", subtaskId);
@@ -400,26 +438,33 @@ public class MySqlSourceReader<T>
     private void fillMetadataForBinlogSplit(BinlogSplitMetaEvent metadataEvent) {
         MySqlBinlogSplit binlogSplit = uncompletedBinlogSplits.get(metadataEvent.getSplitId());
         if (binlogSplit != null) {
-            final int receivedMetaGroupId = metadataEvent.getMetaGroupId();
-            final int receivedTotalFinishedSplitSize = metadataEvent.getTotalFinishedSplitSize();
+            final int currentNumberOnReader = binlogSplit.getFinishedSnapshotSplitInfos().size();
+            final MySqlBinlogSplit.Digest digestOnReader = binlogSplit.getDigest();
+            final MySqlBinlogSplit.Digest digestOnEnumerator = metadataEvent.getDigest();
+            final int maxMetaGroupSize = sourceConfig.getSplitMetaGroupSize();
             final int expectedMetaGroupId =
                     ChunkUtils.getNextMetaGroupId(
-                            binlogSplit.getFinishedSnapshotSplitInfos().size(),
-                            sourceConfig.getSplitMetaGroupSize());
-            if (receivedTotalFinishedSplitSize < binlogSplit.getTotalFinishedSplitSize()) {
+                            currentNumberOnReader, sourceConfig.getSplitMetaGroupSize());
+            final int receivedMetaGroupId = metadataEvent.getMetaGroupId();
+            if (!digestOnReader.equals(digestOnEnumerator)) {
                 LOG.warn(
-                        "Source reader {} receives out of bound finished split size. The received finished split size is {}, but expected is {}, truncate it",
+                        "Source reader {} received a binlog split metadata group with a non-matching digest. The received digest is {}, but expected is {}. Starting over.",
                         subtaskId,
-                        receivedTotalFinishedSplitSize,
-                        binlogSplit.getTotalFinishedSplitSize());
-                binlogSplit =
-                        MySqlBinlogSplit.toNormalBinlogSplit(
-                                binlogSplit, receivedTotalFinishedSplitSize);
+                        digestOnReader,
+                        digestOnEnumerator);
+                binlogSplit = binlogSplit.withNewDigest(digestOnEnumerator);
                 uncompletedBinlogSplits.put(binlogSplit.splitId(), binlogSplit);
             } else if (receivedMetaGroupId == expectedMetaGroupId) {
+                int totalNumberOnReader = digestOnReader.getTotalNumberOfFinishedSnapshotSplits();
+                LOG.info(
+                        "Source reader {} received binlog split metadata group {}: {} new split-infos ({} were previously available, {} expected in total)",
+                        subtaskId,
+                        receivedMetaGroupId,
+                        metadataEvent.getMetaGroup().size(),
+                        currentNumberOnReader,
+                        totalNumberOnReader);
                 int expectedNumberOfAlreadyRetrievedElements =
-                        binlogSplit.getFinishedSnapshotSplitInfos().size()
-                                % sourceConfig.getSplitMetaGroupSize();
+                        currentNumberOnReader % maxMetaGroupSize;
                 List<byte[]> metaGroup = metadataEvent.getMetaGroup();
                 if (expectedNumberOfAlreadyRetrievedElements > 0) {
                     LOG.info(
@@ -436,13 +481,12 @@ public class MySqlSourceReader<T>
                         metaGroup.stream()
                                 .map(FinishedSnapshotSplitInfo::deserialize)
                                 .collect(Collectors.toList());
-
                 uncompletedBinlogSplits.put(
                         binlogSplit.splitId(),
                         MySqlBinlogSplit.appendFinishedSplitInfos(
                                 binlogSplit, newAddedMetadataGroup));
-                LOG.debug(
-                        "Source reader {} fills metadata of group {} to binlog split",
+                LOG.info(
+                        "Source reader {} fills metadata of group {} to binlog split ({} elements)",
                         subtaskId,
                         newAddedMetadataGroup.size());
             } else {

@@ -19,7 +19,11 @@ package org.apache.flink.cdc.connectors.mysql.source.events;
 
 import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.cdc.connectors.mysql.source.enumerator.MySqlSourceEnumerator;
+import org.apache.flink.cdc.connectors.mysql.source.offset.BinlogOffset;
 import org.apache.flink.cdc.connectors.mysql.source.reader.MySqlSourceReader;
+import org.apache.flink.cdc.connectors.mysql.source.split.MySqlBinlogSplit;
+
+import java.util.Objects;
 
 /**
  * The {@link SourceEvent} that {@link MySqlSourceReader} sends to {@link MySqlSourceEnumerator} to
@@ -32,13 +36,18 @@ public class BinlogSplitMetaRequestEvent implements SourceEvent {
     private final String splitId;
     private final int requestMetaGroupId;
 
-    private final int totalFinishedSplitSize;
+    private final BinlogOffset currentBinlogOffset;
+    private final MySqlBinlogSplit.Digest expectedDigest;
 
     public BinlogSplitMetaRequestEvent(
-            String splitId, int requestMetaGroupId, int totalFinishedSplitSize) {
+            String splitId,
+            int requestMetaGroupId,
+            BinlogOffset currentBinlogOffset,
+            MySqlBinlogSplit.Digest expectedDigest) {
         this.splitId = splitId;
         this.requestMetaGroupId = requestMetaGroupId;
-        this.totalFinishedSplitSize = totalFinishedSplitSize;
+        this.currentBinlogOffset = currentBinlogOffset;
+        this.expectedDigest = expectedDigest;
     }
 
     public String getSplitId() {
@@ -49,7 +58,49 @@ public class BinlogSplitMetaRequestEvent implements SourceEvent {
         return requestMetaGroupId;
     }
 
-    public int getTotalFinishedSplitSize() {
-        return totalFinishedSplitSize;
+    public BinlogOffset getCurrentBinlogOffset() {
+        return currentBinlogOffset;
+    }
+
+    public MySqlBinlogSplit.Digest getExpectedDigest() {
+        return expectedDigest;
+    }
+
+    @Override
+    public String toString() {
+        return "BinlogSplitMetaRequestEvent{"
+                + "splitId='"
+                + splitId
+                + '\''
+                + ", requestMetaGroupId="
+                + requestMetaGroupId
+                + ", startingOffset="
+                + currentBinlogOffset
+                + ", expectedDigest="
+                + expectedDigest
+                + '}';
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+
+        if (!(o instanceof BinlogSplitMetaRequestEvent)) {
+            return false;
+        }
+
+        BinlogSplitMetaRequestEvent that = (BinlogSplitMetaRequestEvent) o;
+
+        return Objects.equals(splitId, that.splitId)
+                && requestMetaGroupId == that.requestMetaGroupId
+                && expectedDigest == that.expectedDigest
+                && Objects.equals(currentBinlogOffset, that.currentBinlogOffset);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(splitId, requestMetaGroupId, expectedDigest, currentBinlogOffset);
     }
 }

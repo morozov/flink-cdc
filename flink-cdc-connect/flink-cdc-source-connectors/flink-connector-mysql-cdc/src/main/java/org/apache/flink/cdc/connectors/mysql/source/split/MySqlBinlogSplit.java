@@ -27,7 +27,9 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -48,7 +50,15 @@ public class MySqlBinlogSplit extends MySqlSplit {
     private final List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos;
 
     private final Map<TableId, TableChange> tableSchemas;
-    private final int totalFinishedSplitSize;
+
+    /**
+     * The digest of the binlog split metadata that currently exist on the enumerator.
+     *
+     * <p>Once all finished snapshot split infos have been replicated, their checksum is validated
+     * against the expected one.
+     */
+    private final Digest digest;
+
     private final boolean isSuspended;
     private final String tablesForLog;
     @Nullable transient byte[] serializedFormCache;
@@ -59,17 +69,33 @@ public class MySqlBinlogSplit extends MySqlSplit {
             BinlogOffset endingOffset,
             List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos,
             Map<TableId, TableChange> tableSchemas,
-            int totalFinishedSplitSize,
+            Digest digest,
             boolean isSuspended) {
         super(splitId);
 
         ensureNoDuplicates(finishedSnapshotSplitInfos);
 
+        int totalNumberOfFinishedSnapshotSplits = digest.getTotalNumberOfFinishedSnapshotSplits();
+        int numberOfReplicatedFinishedSnapshotSplits = finishedSnapshotSplitInfos.size();
+
+        if (numberOfReplicatedFinishedSnapshotSplits > totalNumberOfFinishedSnapshotSplits) {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "The number of replicated finished snapshot split infos %d cannot be larger than the total number %d.",
+                            numberOfReplicatedFinishedSnapshotSplits,
+                            totalNumberOfFinishedSnapshotSplits));
+        }
+
+        // validate the checksum once all metadata has been fully replicated
+        if (numberOfReplicatedFinishedSnapshotSplits == totalNumberOfFinishedSnapshotSplits) {
+            digest.validate(finishedSnapshotSplitInfos);
+        }
+
         this.startingOffset = startingOffset;
         this.endingOffset = endingOffset;
         this.finishedSnapshotSplitInfos = finishedSnapshotSplitInfos;
+        this.digest = digest;
         this.tableSchemas = tableSchemas;
-        this.totalFinishedSplitSize = totalFinishedSplitSize;
         this.isSuspended = isSuspended;
         this.tablesForLog = getTablesForLog();
     }
@@ -80,14 +106,14 @@ public class MySqlBinlogSplit extends MySqlSplit {
             BinlogOffset endingOffset,
             List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos,
             Map<TableId, TableChange> tableSchemas,
-            int totalFinishedSplitSize) {
+            Digest digest) {
         this(
                 splitId,
                 startingOffset,
                 endingOffset,
                 finishedSnapshotSplitInfos,
                 tableSchemas,
-                totalFinishedSplitSize,
+                digest,
                 false);
     }
 
@@ -123,8 +149,8 @@ public class MySqlBinlogSplit extends MySqlSplit {
         return tableSchemas;
     }
 
-    public int getTotalFinishedSplitSize() {
-        return totalFinishedSplitSize;
+    public Digest getDigest() {
+        return digest;
     }
 
     public boolean isSuspended() {
@@ -132,7 +158,7 @@ public class MySqlBinlogSplit extends MySqlSplit {
     }
 
     public boolean isCompletedSplit() {
-        return totalFinishedSplitSize == finishedSnapshotSplitInfos.size();
+        return finishedSnapshotSplitInfos.size() == digest.totalNumberOfFinishedSnapshotSplits;
     }
 
     private String getTablesForLog() {
@@ -161,7 +187,7 @@ public class MySqlBinlogSplit extends MySqlSplit {
             return false;
         }
         MySqlBinlogSplit that = (MySqlBinlogSplit) o;
-        return totalFinishedSplitSize == that.totalFinishedSplitSize
+        return Objects.equals(digest, that.digest)
                 && isSuspended == that.isSuspended
                 && Objects.equals(startingOffset, that.startingOffset)
                 && Objects.equals(endingOffset, that.endingOffset)
@@ -177,7 +203,7 @@ public class MySqlBinlogSplit extends MySqlSplit {
                 endingOffset,
                 finishedSnapshotSplitInfos,
                 tableSchemas,
-                totalFinishedSplitSize,
+                digest,
                 isSuspended);
     }
 
@@ -195,6 +221,8 @@ public class MySqlBinlogSplit extends MySqlSplit {
                 + endingOffset
                 + ", isSuspended="
                 + isSuspended
+                + ", digest="
+                + digest
                 + '}';
     }
 
@@ -210,67 +238,111 @@ public class MySqlBinlogSplit extends MySqlSplit {
                 startingOffset = splitInfo.getHighWatermark();
             }
         }
-        splitInfos.addAll(binlogSplit.getFinishedSnapshotSplitInfos());
+
+        List<FinishedSnapshotSplitInfo> updatedSplitInfos =
+                new ArrayList<>(binlogSplit.getFinishedSnapshotSplitInfos());
+        updatedSplitInfos.addAll(splitInfos);
+
+        return new MySqlBinlogSplit(
+                binlogSplit.splitId,
+                startingOffset,
+                binlogSplit.getEndingOffset(),
+                updatedSplitInfos,
+                binlogSplit.getTableSchemas(),
+                binlogSplit.getDigest(),
+                binlogSplit.isSuspended());
+    }
+
+    public static MySqlBinlogSplit replaceFinishedSplitInfos(
+            MySqlBinlogSplit binlogSplit, List<FinishedSnapshotSplitInfo> splitInfos) {
+        LOG.info("Creating new binlogsplit with the new table splits");
+        // added by decodable in case where we want to fully replace the splitinfos of the binlog
+        // this should be similar to appendFinishedSplitInfos, only replacing the splitinfos but
+        // everything else same
+        // re-calculate the starting binlog offset after the new table added
+
+        // find new splits that did not exist
+        Set<String> oldExistingSplitIds =
+                binlogSplit.getFinishedSnapshotSplitInfos().stream()
+                        .map(FinishedSnapshotSplitInfo::getSplitId)
+                        .collect(Collectors.toSet());
+        List<FinishedSnapshotSplitInfo> newSplitsOnly = new ArrayList<>();
+        for (FinishedSnapshotSplitInfo splitInfo : splitInfos) {
+            if (!oldExistingSplitIds.contains(splitInfo.getSplitId())) {
+                newSplitsOnly.add(splitInfo);
+            }
+        }
+        LOG.info(
+                "New splits extracted: "
+                        + newSplitsOnly.stream()
+                                .map(FinishedSnapshotSplitInfo::getSplitId)
+                                .collect(Collectors.toList()));
+
+        BinlogOffset newSplitsStartingOffset = null;
+        FinishedSnapshotSplitInfo lowestHMSplit = null;
+        for (FinishedSnapshotSplitInfo newSplit : newSplitsOnly) {
+            // calculate the starting offset based on new splits only (lowest of the highwatermark)
+            if (newSplitsStartingOffset == null) {
+                newSplitsStartingOffset = newSplit.getHighWatermark();
+                lowestHMSplit = newSplit;
+            } else if (newSplit.getHighWatermark().isBefore(newSplitsStartingOffset)) {
+                newSplitsStartingOffset = newSplit.getHighWatermark();
+                lowestHMSplit = newSplit;
+            }
+        }
+
+        // take the earliest of either the new table splits's starting offset or the last binlog
+        // offset read
+        BinlogOffset lastBinlogOffset = binlogSplit.getStartingOffset();
+        BinlogOffset startingOffset = newSplitsStartingOffset;
+        if (lastBinlogOffset.isBefore(newSplitsStartingOffset)) {
+            startingOffset = lastBinlogOffset;
+            LOG.info(
+                    "New binlog starting offset was set from last binlog offset position "
+                            + startingOffset);
+        } else {
+            LOG.info(
+                    "New binlog starting offset was set from new table: "
+                            + lowestHMSplit
+                            + ",  starting offset: "
+                            + startingOffset);
+        }
+
         return new MySqlBinlogSplit(
                 binlogSplit.splitId,
                 startingOffset,
                 binlogSplit.getEndingOffset(),
                 splitInfos,
                 binlogSplit.getTableSchemas(),
-                binlogSplit.getTotalFinishedSplitSize(),
+                binlogSplit.getDigest(),
                 binlogSplit.isSuspended());
     }
 
     /**
-     * Filter out the outdated finished splits in {@link MySqlBinlogSplit}.
+     * Constructs a new instance derived from this one without the no longer relevant table schemas.
      *
-     * <p>When restore from a checkpoint, the finished split infos may contain some splits from the
-     * deleted tables. We need to remove these splits from the total finished split infos and update
-     * the size, while also removing the outdated tables from the table schemas of binlog split.
+     * <p>Once the source configuration has changed, the binlog split may contain the schemas of the
+     * tables that are no longer captured by the source. Their schemas are no longer relevant and
+     * may be discarded.
      */
-    public static MySqlBinlogSplit filterOutdatedSplitInfos(
-            MySqlBinlogSplit binlogSplit, Tables.TableFilter currentTableFilter) {
-        Map<TableId, TableChange> filteredTableSchemas =
-                binlogSplit.getTableSchemas().entrySet().stream()
-                        .filter(entry -> currentTableFilter.isIncluded(entry.getKey()))
+    public MySqlBinlogSplit withoutIrrelevantTableSchemas(Tables.TableFilter tableFilter) {
+        Map<TableId, TableChange> relevantTableSchemas =
+                tableSchemas.entrySet().stream()
+                        .filter(entry -> tableFilter.isIncluded(entry.getKey()))
                         .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
 
-        Set<TableId> tablesToRemoveInFinishedSnapshotSplitInfos =
-                binlogSplit.getFinishedSnapshotSplitInfos().stream()
-                        .filter(i -> !currentTableFilter.isIncluded(i.getTableId()))
-                        .map(split -> split.getTableId())
-                        .collect(Collectors.toSet());
-        if (tablesToRemoveInFinishedSnapshotSplitInfos.isEmpty()) {
-            return new MySqlBinlogSplit(
-                    binlogSplit.splitId,
-                    binlogSplit.getStartingOffset(),
-                    binlogSplit.getEndingOffset(),
-                    binlogSplit.getFinishedSnapshotSplitInfos(),
-                    filteredTableSchemas,
-                    binlogSplit.totalFinishedSplitSize,
-                    binlogSplit.isSuspended());
+        if (relevantTableSchemas.size() == tableSchemas.size()) {
+            return this;
         }
 
-        LOG.info(
-                "Reader remove tables after restart: {}",
-                tablesToRemoveInFinishedSnapshotSplitInfos);
-        List<FinishedSnapshotSplitInfo> allFinishedSnapshotSplitInfos =
-                binlogSplit.getFinishedSnapshotSplitInfos().stream()
-                        .filter(
-                                i ->
-                                        !tablesToRemoveInFinishedSnapshotSplitInfos.contains(
-                                                i.getTableId()))
-                        .collect(Collectors.toList());
         return new MySqlBinlogSplit(
-                binlogSplit.splitId,
-                binlogSplit.getStartingOffset(),
-                binlogSplit.getEndingOffset(),
-                allFinishedSnapshotSplitInfos,
-                filteredTableSchemas,
-                binlogSplit.getTotalFinishedSplitSize()
-                        - (binlogSplit.getFinishedSnapshotSplitInfos().size()
-                                - allFinishedSnapshotSplitInfos.size()),
-                binlogSplit.isSuspended());
+                splitId,
+                startingOffset,
+                endingOffset,
+                finishedSnapshotSplitInfos,
+                relevantTableSchemas,
+                digest,
+                isSuspended);
     }
 
     public static MySqlBinlogSplit fillTableSchemas(
@@ -282,19 +354,23 @@ public class MySqlBinlogSplit extends MySqlSplit {
                 binlogSplit.getEndingOffset(),
                 binlogSplit.getFinishedSnapshotSplitInfos(),
                 tableSchemas,
-                binlogSplit.getTotalFinishedSplitSize(),
+                binlogSplit.getDigest(),
                 binlogSplit.isSuspended());
     }
 
-    public static MySqlBinlogSplit toNormalBinlogSplit(
-            MySqlBinlogSplit suspendedBinlogSplit, int totalFinishedSplitSize) {
+    /**
+     * Constructs a new instance derived from this one with the given metadata digest. The {@link
+     * #finishedSnapshotSplitInfos} will be cleared on the new instance in order to initialize their
+     * replication from scratch.
+     */
+    public MySqlBinlogSplit withNewDigest(MySqlBinlogSplit.Digest digest) {
         return new MySqlBinlogSplit(
-                suspendedBinlogSplit.splitId,
-                suspendedBinlogSplit.getStartingOffset(),
-                suspendedBinlogSplit.getEndingOffset(),
-                suspendedBinlogSplit.getFinishedSnapshotSplitInfos(),
-                suspendedBinlogSplit.getTableSchemas(),
-                totalFinishedSplitSize,
+                splitId,
+                startingOffset,
+                endingOffset,
+                Collections.emptyList(),
+                tableSchemas,
+                digest,
                 false);
     }
 
@@ -303,43 +379,105 @@ public class MySqlBinlogSplit extends MySqlSplit {
                 normalBinlogSplit.splitId,
                 normalBinlogSplit.getStartingOffset(),
                 normalBinlogSplit.getEndingOffset(),
-                forwardHighWatermarkToStartingOffset(
-                        normalBinlogSplit.getFinishedSnapshotSplitInfos(),
-                        normalBinlogSplit.getStartingOffset()),
+                Collections.emptyList(),
                 normalBinlogSplit.getTableSchemas(),
-                normalBinlogSplit.getTotalFinishedSplitSize(),
+                Digest.empty(),
                 true);
     }
 
-    /**
-     * Forwards {@link FinishedSnapshotSplitInfo#getHighWatermark()} to current binlog reading
-     * offset for these snapshot-splits have started the binlog reading, this is pretty useful for
-     * newly added table process that we can continue to consume binlog for these splits from the
-     * updated high watermark.
-     *
-     * @param existedSplitInfos
-     * @param currentBinlogReadingOffset
-     */
-    private static List<FinishedSnapshotSplitInfo> forwardHighWatermarkToStartingOffset(
-            List<FinishedSnapshotSplitInfo> existedSplitInfos,
-            BinlogOffset currentBinlogReadingOffset) {
-        List<FinishedSnapshotSplitInfo> updatedSnapshotSplitInfos = new ArrayList<>();
-        for (FinishedSnapshotSplitInfo existedSplitInfo : existedSplitInfos) {
-            // for split has started read binlog, forward its high watermark to current binlog
-            // reading offset
-            if (existedSplitInfo.getHighWatermark().isBefore(currentBinlogReadingOffset)) {
-                FinishedSnapshotSplitInfo forwardHighWatermarkSnapshotSplitInfo =
-                        new FinishedSnapshotSplitInfo(
-                                existedSplitInfo.getTableId(),
-                                existedSplitInfo.getSplitId(),
-                                existedSplitInfo.getSplitStart(),
-                                existedSplitInfo.getSplitEnd(),
-                                currentBinlogReadingOffset);
-                updatedSnapshotSplitInfos.add(forwardHighWatermarkSnapshotSplitInfo);
-            } else {
-                updatedSnapshotSplitInfos.add(existedSplitInfo);
+    /** Represents the digest of the binlog split metadata. */
+    public static class Digest implements Serializable {
+        private static final Logger LOG = LoggerFactory.getLogger(MySqlBinlogSplit.Digest.class);
+
+        /**
+         * The total number of finished snapshot splits that need to be replicated to the source
+         * reader before the binlog split is considered complete.
+         */
+        private final int totalNumberOfFinishedSnapshotSplits;
+
+        /**
+         * The checksum that the finished snapshot split infos must have once fully replicated to
+         * the source reader.
+         */
+        private final int checksum;
+
+        /**
+         * This constructor exists primarily for use during deserialization. In all other cases, use
+         * the static factory methods provided.
+         */
+        public Digest(int totalNumberOfFinishedSnapshotSplits, int checksum) {
+            if (totalNumberOfFinishedSnapshotSplits < 0) {
+                throw new IllegalArgumentException(
+                        "The total number of finished snapshot splits cannot be negative.");
+            }
+
+            this.totalNumberOfFinishedSnapshotSplits = totalNumberOfFinishedSnapshotSplits;
+            this.checksum = checksum;
+        }
+
+        public int getTotalNumberOfFinishedSnapshotSplits() {
+            return totalNumberOfFinishedSnapshotSplits;
+        }
+
+        public int getChecksum() {
+            return checksum;
+        }
+
+        public void validate(List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos) {
+            int actualChecksum = checksum(finishedSnapshotSplitInfos);
+            if (actualChecksum != checksum) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "The checksum of finished snapshot split infos %d does not match the expected checksum %d.",
+                                actualChecksum, checksum));
             }
         }
-        return updatedSnapshotSplitInfos;
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Digest)) {
+                return false;
+            }
+            Digest that = (Digest) o;
+            return checksum == that.checksum
+                    && totalNumberOfFinishedSnapshotSplits
+                            == that.totalNumberOfFinishedSnapshotSplits;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(totalNumberOfFinishedSnapshotSplits, checksum);
+        }
+
+        @Override
+        public String toString() {
+            return "Digest{"
+                    + "totalNumberOfFinishedSnapshotSplits="
+                    + totalNumberOfFinishedSnapshotSplits
+                    + ", checksum="
+                    + checksum
+                    + '}';
+        }
+
+        /** Creates a checksum based on the list of finished snapshot split infos. */
+        public static Digest of(List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos) {
+            return new Digest(
+                    finishedSnapshotSplitInfos.size(), checksum(finishedSnapshotSplitInfos));
+        }
+
+        /** Creates an empty digest. */
+        public static Digest empty() {
+            return of(Collections.emptyList());
+        }
+
+        /** Calculates the checksum of the given finished snapshot split infos. */
+        private static int checksum(List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos) {
+            int checksum = finishedSnapshotSplitInfos.hashCode();
+            LOG.debug("Calculated checksum of {}: {}", finishedSnapshotSplitInfos, checksum);
+            return checksum;
+        }
     }
 }
